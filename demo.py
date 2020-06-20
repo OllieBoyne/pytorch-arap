@@ -39,8 +39,8 @@ def equal_3d_axes(ax, X, Y, Z, zoom=1.0):
 	ax.set_ylim(mid_y - max_range, mid_y + max_range)
 	ax.set_zlim(mid_z - max_range, mid_z + max_range)
 
-def plot_meshes(ax, meshes, static_verts=[], handle_verts=[], change_lims=False, color="darkcyan",
-				prop=True, zoom=1.5):
+def plot_meshes(ax, verts, faces, static_verts=[], handle_verts=[], change_lims=False, color="darkcyan",
+				prop=True, zoom=1.5, n_meshes=1):
 	"""
 	:type mesh: ARAPMeshes
 	:type rots: array to prerotate a mesh by
@@ -48,10 +48,9 @@ def plot_meshes(ax, meshes, static_verts=[], handle_verts=[], change_lims=False,
 
 	trisurfs = []
 
-	for n in range(len(meshes)):
-		points = meshes.verts_list()[n].detach().numpy()
-		faces = meshes.faces_list()[n].detach().numpy()
-
+	for n in range(n_meshes):
+		points = verts[n].detach().numpy()
+		faces = faces[n].detach().numpy()
 
 		X, Y, Z = np.rollaxis(points, -1)
 		tri = Triangulation(X, Y, triangles=faces).triangles
@@ -108,7 +107,7 @@ def deform_cuboid():
 
 	n_frames = 90
 	def anim(i):
-		[x.remove() for x in trisurfs+scatters] # remove previous frame's mesh
+		[x.remove() for x in trisurfs] # remove previous frame's mesh
 
 		# 3D rotation matrix - theta deg about Z
 		theta = (np.pi/4) * min(i/(n_frames/2), 1)
@@ -124,7 +123,7 @@ def deform_cuboid():
 		## deform, replot
 		meshes.solve(static_verts=static_verts, handle_verts=handle_verts, handle_verts_pos=handle_pos_shifted,
 					 n_its=0)  ## run ARAP
-		trisurfs[:], scatters[:] = plot_meshes(ax, meshes, handle_verts=handle_verts, static_verts=static_verts)
+		trisurfs[:] = plot_meshes(ax, meshes, handle_verts=handle_verts, static_verts=static_verts)
 
 	ax.axis("off")
 	# anim(1)
@@ -177,33 +176,34 @@ def deform_sphere():
 
 def deform_cactus():
 
-	targ = os.path.join("sample_meshes", "lp_cactus.obj")
+	targ = os.path.join("sample_meshes", "cactus.obj")
 	meshes = load_objs_as_meshes([targ], load_textures=False)
 	meshes = ARAP_from_meshes(meshes) # convert to ARAP obejct
 	N = meshes.num_verts_per_mesh()[0]
 
-	meshes.rotate(mesh_idx=0, rot_x=np.pi/2)
-
 	# handle as topmost vert
-	handle_verts = [79]
+	handle_verts = [504]
 	handle_verts = add_one_ring_neighbours(meshes, handle_verts)
 	handle_pos = meshes.verts_padded()[0][handle_verts]
 	handle_pos_shifted = handle_pos.clone()
 
 	# static as base
-	static_verts = [41] # centres of paws
-	static_verts = add_n_ring_neighbours(meshes, static_verts, n = 1)
+	static_verts = [619] # centres of base
+	static_verts = add_n_ring_neighbours(meshes, static_verts, n = 2)
+
+	faces = meshes.faces_list()
 
 	prop = True
-	trisurfs = plot_meshes(ax, meshes, handle_verts=handle_verts, static_verts=static_verts, prop=prop, change_lims=True,
+	trisurfs = plot_meshes(ax, meshes.verts_list(), faces, handle_verts=handle_verts, static_verts=static_verts, prop=prop, change_lims=True,
 						   color="gray", zoom=1.5)
 
 	disp_vec = torch.FloatTensor([1, 0, 0])  # displace in x direction
 
-	n_frames = 30
-	disp_frac = 0.02 # fraction of full disp_vec to move in animation
+	n_frames = 40
+	disp_frac = 0.4 # fraction of full disp_vec to move in animation
 	step = disp_frac * 4/n_frames # moves
 
+	nits = 1
 	def anim(i):
 		[x.remove() for x in trisurfs] # remove previous frame's mesh
 
@@ -215,17 +215,23 @@ def deform_cactus():
 		handle_pos_shifted[:] += direction * step * disp_vec
 
 		## deform, replot
-		meshes.solve(static_verts=static_verts, handle_verts=handle_verts, handle_verts_pos=handle_pos_shifted, n_its = 1,
+		verts = meshes.solve(static_verts=static_verts, handle_verts=handle_verts, handle_verts_pos=handle_pos_shifted, n_its = nits,
 					 track_energy=False) ## run ARAP
 
-		trisurfs[:] = plot_meshes(ax, meshes, handle_verts=handle_verts, static_verts=static_verts, prop=prop,
+		verts = [verts]
+
+		trisurfs[:] = plot_meshes(ax, verts, faces, handle_verts=handle_verts, static_verts=static_verts, prop=prop,
 								  color="gray")
 
+	# [anim(i) for i in range(10)]
+	# anim(0)
+	f = 1
+	n_unknown = N - len(static_verts) - len(handle_verts)
+	# [anim(i) for i in range(f)]
+
+	# print(meshes.timer.report(nits=f, rots=f*nits, b1=f*nits, b2=f*nits, b3=f*nits))
+	# plt.show()
 	#
-
-	# anim(1)
-	plt.show()
-
 	ax.axis("off")
 	save_animation(fig, anim, n_frames=n_frames, title="cactus", fps = 30)
 
@@ -246,12 +252,13 @@ def deform_smal():
 
 	# static as base
 	static_verts = [1792, 3211, 95, 3667] # centres of paws
-	static_verts = add_n_ring_neighbours(meshes, static_verts, n = 5)
-	static_verts = []
+	# static_verts += [262] # bottom of mouth
+	static_verts = add_n_ring_neighbours(meshes, static_verts, n = 6)
 
+	faces = meshes.faces_list()
 
 	prop = True
-	trisurfs = plot_meshes(ax, meshes, handle_verts=handle_verts, static_verts=static_verts, prop=prop, change_lims=True,
+	trisurfs = plot_meshes(ax, meshes.verts_list(), faces, handle_verts=handle_verts, static_verts=static_verts, prop=prop, change_lims=True,
 						   color="gray", zoom=1.5)
 
 	disp_vec = torch.FloatTensor([1, 0, 0])  # displace in x direction
@@ -271,19 +278,21 @@ def deform_smal():
 		handle_pos_shifted[:] += direction * step * disp_vec
 
 		## deform, replot
-		meshes.solve(static_verts=static_verts, handle_verts=handle_verts, handle_verts_pos=handle_pos_shifted, n_its = 1,
+		verts = meshes.solve(static_verts=static_verts, handle_verts=handle_verts, handle_verts_pos=handle_pos_shifted, n_its = 1,
 					 track_energy=False) ## run ARAP
 
-		trisurfs[:] = plot_meshes(ax, meshes, handle_verts=handle_verts, static_verts=static_verts, prop=prop,
+		verts = [verts]
+
+		trisurfs[:] = plot_meshes(ax, verts, faces, handle_verts=handle_verts, static_verts=static_verts, prop=prop,
 								  color="gray")
 
 	#
 
-	[anim(1) for i in range(3)]
+	[anim(1) for i in range(1)]
 	plt.show()
 
 	ax.axis("off")
-	save_animation(fig, anim, n_frames=n_frames, title="cactus", fps = 30)
+	save_animation(fig, anim, n_frames=n_frames, title="smal", fps = 30)
 
 def deform_dog():
 	targ = os.path.join("sample_meshes", "dog.obj")
@@ -345,9 +354,10 @@ if __name__ == "__main__":
 
 	fig, ax = plt.subplots(subplot_kw=dict(projection="3d"))
 
+	# deform_cuboid()
 	# deform_sphere()
-	deform_smal()
-	# deform_cactus()
+	# deform_smal()
+	deform_cactus()
 
 
 

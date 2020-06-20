@@ -9,7 +9,7 @@ from pytorch3d.structures import utils as struct_utils
 from collections import defaultdict
 from time import perf_counter
 from scipy.optimize import lsq_linear
-from utils import least_sq_with_known_values, Timer
+from utils import least_sq_with_known_values, Timer, is_positive_definite, selective_svd
 from tqdm import tqdm
 from matplotlib import pyplot as plt
 
@@ -66,11 +66,11 @@ class ARAPMeshes(Meshes):
 
 		self.one_ring_neighbours = self.get_one_ring_neighbours()
 
-		self.L, self.w, self.L_inv = self.precompute()  # Precomputed edge weights and Laplace-Beltrami operator
-
 		self.C = self.verts_padded().mean(dim=1) # centre of mass for each mesh
-
 		self.timer = Timer()
+
+		self.precomputed_params = {} # dictionary to store precomputed parameters
+		self.precompute_laplacian()  # Precomputed edge weights and Laplace-Beltrami operator
 
 	def get_one_ring_neighbours(self):
 		"""Return a dict, where key i gives a list of all neighbouring vertices (connected by exactly one edge)"""
@@ -91,7 +91,7 @@ class ARAPMeshes(Meshes):
 
 		return orn
 
-	def precompute(self):
+	def precompute_laplacian(self):
 		"""Precompute edge weights and Laplacian-Beltrami operator"""
 
 		n = self.num_verts_per_mesh()
@@ -116,12 +116,40 @@ class ARAPMeshes(Meshes):
 		for i, (start, end) in enumerate(zip(cum_n[:-1], cum_n[1:])):
 			w_padded[i] = w_packed[start:end, start:end]
 			L_padded[i] = L_packed[start:end, start:end]
-			# L_inv_padded[i] = torch.inverse(L_padded[i])
-			#
-
 			L_inv_padded[i] = cholesky_invert(L_padded[i])
 
-		return L_padded, w_padded, L_inv_padded
+		self.precomputed_params["L_padded"] = L_padded
+		self.precomputed_params["w_padded"] = w_padded
+		self.precomputed_params["L_inv_padded"] = L_inv_padded
+
+	def precompute_reduced_laplacian(self, static_verts, handle_verts):
+		"""Precompute the Laplacian-Beltrami operator for the reduced set of vertices, negating static and handle verts"""
+
+		L = self.precomputed_params["L_padded"][0]
+		N = self.num_verts_per_mesh()[0]
+		unknown_verts = [n for n in range(N) if n not in static_verts + handle_verts] # all unknown verts
+		L_reduced = L.clone()[np.ix_(unknown_verts, unknown_verts)] # sample sub laplacian matrix for unknowns only
+		L_reduced_inv = cholesky_invert(L_reduced)
+
+		self.precomputed_params["L_reduced_inv"] = L_reduced_inv
+
+	def precompute_PD(self):
+		"""Precompute the product of the undeformed edges and laplacian weights - PD. Used to calculate
+		the rigid body relations R"""
+
+		N = self.num_verts_per_mesh()[0]
+		p = self.verts_padded()[0]  # undeformed verts
+		w = self.precomputed_params["w_padded"][0]
+
+		cell_size_max = max(map(len, self.one_ring_neighbours[0].values())) # maximum size of a cell
+		PD = torch.zeros((N, 3, cell_size_max)) # This is a padded Tensor, that includes Pi * Di for each cell
+		for i in range(N):
+			j = self.one_ring_neighbours[0][i]
+			Pi = (p[i] - p[j]).T
+			Di = torch.diag(w[i][j])
+			PD[i, :, :len(j)] = torch.mm(Pi, Di)
+
+		self.precomputed_params["PD"] = PD
 
 	def solve(self, static_verts, handle_verts, handle_verts_pos, mesh_idx=0, n_its=1,
 			  track_energy = False, report=False):
@@ -141,53 +169,46 @@ class ARAPMeshes(Meshes):
 		N = self.num_verts_per_mesh()[mesh_idx]
 		p = self.verts_padded()[mesh_idx]  # initial mesh
 
-		# Initial guess using Naive Laplacian editing: least square minimisation of |Lp0 - Lp|, subject to known
-		# constraints on the values of p, from static and handles
-		w = self.w[mesh_idx]
-		L = self.L[mesh_idx]
+		w = self.precomputed_params["w_padded"][mesh_idx]
+		L = self.precomputed_params["L_padded"][mesh_idx]
 
 		known_handles = {i:pos for i,pos in zip(handle_verts, handle_verts_pos)}
 		known_static = {v:p[v] for v in static_verts}
 		known = {**known_handles, **known_static}
 
+		# Initial guess using Naive Laplacian editing: least square minimisation of |Lp0 - Lp|, subject to known
+		# constraints on the values of p, from static and handles
 		p_prime = least_sq_with_known_values(L, torch.mm(L, p), known=known)
 		# TODO: address poor conditioning leading to some large deviations in value
 
 		if n_its == 0:  # if only want initial guess, end here
-			self.offset_verts_(p_prime - p)
-			return None
+			return p_prime
 
 		## modify L, L_inv and b_fixed to incorporate boundary conditions
 		known_verts = np.array([n for n in range(N) if n in known])
-		known_verts_pos = torch.stack([known[v] for v in known_verts]) # Tensor of (n_known x 3) positions
 		unknown_verts = [n for n in range(N) if n not in known] # indices of all unknown verts
 		n_unknown = len(unknown_verts)
 		n_known = len(known)
 
 		b_fixed = torch.zeros((N, 3))  # factor to be subtracted from b, due to constraints
 		for k, pos in known.items():
-			b_fixed += torch.einsum("i,j->ij", L[:, k], pos)#[unknown]
-		L_unknown = L.clone()[np.ix_(unknown_verts, unknown_verts)] # sample sub laplacian matrix for unknowns only
-		L_inv_unknown = cholesky_invert(L_unknown)
+			b_fixed += torch.einsum("i,j->ij", L[:, k], pos) # [unknown]
 
+		#  Precompute L_reduced_inv if not already done
+		if "L_reduced_inv" not in self.precomputed_params:
+			self.precompute_reduced_laplacian(static_verts, handle_verts)
 
-		## PRECOMPUTE ADDITIONAL PARAMETERS - PD (for rotational equations)
-		cell_size_max = max(map(len, self.one_ring_neighbours[mesh_idx].values())) # maximum size of a cell
-		PD = torch.zeros((N, 3, cell_size_max)) # This is a padded Tensor, that includes Pi * Di for each cell
-		for i in range(N):
-			j = self.one_ring_neighbours[mesh_idx][i]
-			Pi = (p[i] - p[j]).T
-			Di = torch.diag(w[i][j])
-			PD[i, :, :len(j)] = torch.mm(Pi, Di)
+		#  Precompute PD if not already done
+		if "PD" not in self.precomputed_params:
+			self.precompute_PD()
+
+		L_reduced_inv = self.precomputed_params["L_reduced_inv"]
+		PD = self.precomputed_params["PD"]
 
 		# Iterate through method
 		if report: progress = tqdm(total=n_its)
+
 		for it in range(n_its):
-
-			# Precompute all P_primes at each iteration
-			# full = p_prime.unsqueeze(0).repeat(N, 1, 1) # tensor where each row is [p1, p2, p3, ...]
-			# P_prime = (full.permute(1,0,2) - full)
-
 			R = torch.zeros((N, 3, 3))  # Local rotations R
 			for i in range(N):
 				j = self.one_ring_neighbours[mesh_idx][i]
@@ -195,20 +216,19 @@ class ARAPMeshes(Meshes):
 				P_prime_i_T = (p_prime[i] - p_prime[j])
 
 				Si = torch.mm(PD[i, :, :len(j)], P_prime_i_T)
-				Ui, _, Vi = torch.svd(Si)
 
+				Ui, _, Vi = torch.svd(Si)
 				R[i] = torch.mm(Vi, Ui.T)
 
-
 			b = torch.zeros((N, 3)) # RHS of minimum energy equation, with known p's removed
-			for i in range(N):
+			for i in unknown_verts:
 				j = self.one_ring_neighbours[mesh_idx][i]
-				deforms = torch.bmm(R[i] + R[j], (p[i] - p[j]).unsqueeze(-1)).squeeze(-1)  # ( N x 3)
-				b[i] = 0.5 * torch.mv(deforms.T, w[i,j]) # weighted product of deforms
+				deforms = torch.bmm(R[i] + R[j], (p[i] - p[j]).unsqueeze(-1)).squeeze(-1)  # ( len(j) x 3)
+				b[i] = 0.5 * torch.mv(deforms.T, w[i,j])  # weighted product of deforms (3)
 
+			# self.timer.add("b")
 			b -= b_fixed  # subtract component of LHS not included - constraints
-
-			p_prime_unknown = torch.mm(L_inv_unknown, b[unknown_verts])  # predicted p's for only unknown values
+			p_prime_unknown = torch.mm(L_reduced_inv, b[unknown_verts])  # predicted p's for only unknown values
 
 			p_prime = torch.zeros_like(p_prime)  # generate next iteration of fit, from p0_unknown and constraints
 			for index, val in known.items():
@@ -231,7 +251,8 @@ class ARAPMeshes(Meshes):
 			if report:
 				progress.update()
 
-		self.offset_verts_(p_prime - p) # apply transformation in place
+		return p_prime # return new vertices
+
 
 	def rotate(self, mesh_idx=0, rot_x=0, rot_y=0, rot_z=0):
 		"""Rotate mesh i, in place, in cardinal directions"""

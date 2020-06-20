@@ -2,13 +2,27 @@ import torch
 from matplotlib import pyplot as plt
 import numpy as np
 
+def is_positive_definite(tensor):
+	"""Bool check if 2D matrix is positive definite
+
+	:type tensor: torch.Tensor"""
+
+	eig, _ = torch.eig(tensor)
+
+	eig = eig[:, 0] # only real part
+
+	return torch.all(eig > 0)
+
+def selective_svd(tensor, tol=1e-5):
+	"""Selectively performs SVD, """
+
 def least_sq_with_known_values(A, b, known = None):
 	"""Solves the least squares problem minx ||Ax - b||2, where some values of x are known.
 	Works by moving all known variables from A to b.
 
-	:param known: dict of known_variable : value
 	:param A: full rank matrix of size (mxn)
 	:param b: matrix of size (m x k)
+	:param known: dict of known_variable : value
 
 	:type A: torch.Tensor
 	:type B: torch.Tensor
@@ -89,32 +103,28 @@ def simplify_obj_file(src):
 	with everything except for vertices and faces."""
 
 	out = []
+	nverts = 3889
 	with open(src) as infile:
-		for line in infile:
-			pass
+		for line in infile.readlines():
+			if line.startswith("v ") or line.startswith("o "):
+				out += [line]
+
+			elif line.startswith("f "):
+				## for f, only preserve v, not vn or vt
+				faceverts = [i.split("/")[0] for i in line.split()[1:]]
+				out_line = "f " + " ".join(faceverts) + "\n"
+				out += [out_line]
+
+				# faceverts_n = list(map(int, faceverts))
+				# if any(v>=nverts for v in faceverts_n):
+				# 	print(line, "Faces have invalid indices")
+
+	out_src = src.replace(".obj", "_simplify.obj")
+	with open(out_src, "w") as outfile:
+		outfile.writelines(out)
+
 
 if __name__ == "__main__":
 
-	# test lstsq with known values
-	y = [1, 3.5, 4]
-	x = torch.FloatTensor( [2, 2.5, 3] )
-	A = torch.ones((len(x), 2))
-	A[:, 0] = x
-
-	b = torch.FloatTensor( y ).unsqueeze(-1)
-
-	# standard regression
-	regr = least_sq_with_known_values(A, b)
-	m, c = regr
-
-	# regression with c = 0 fixed
-	regr_mod = least_sq_with_known_values(A, b, known={1:torch.FloatTensor([0])})
-	m_mod, c_mod = regr_mod
-
-	plt.scatter(x, y)
-	xrange = np.arange(0, x.max(), 0.01)
-	plt.plot(xrange, m * xrange + c, ls="--")
-	plt.plot(xrange, m_mod * xrange + c_mod)
-
-	plt.show()
+	simplify_obj_file("sample_meshes/smal.obj")
 
