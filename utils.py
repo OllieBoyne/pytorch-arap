@@ -1,6 +1,9 @@
 import torch
-from matplotlib import pyplot as plt
 import numpy as np
+from matplotlib.animation import FuncAnimation, writers
+from tqdm import tqdm
+from matplotlib.tri import Triangulation
+from matplotlib.colors import ListedColormap
 
 def is_positive_definite(tensor):
 	"""Bool check if 2D matrix is positive definite
@@ -12,9 +15,6 @@ def is_positive_definite(tensor):
 	eig = eig[:, 0] # only real part
 
 	return torch.all(eig > 0)
-
-def selective_svd(tensor, tol=1e-5):
-	"""Selectively performs SVD, """
 
 def least_sq_with_known_values(A, b, known = None):
 	"""Solves the least squares problem minx ||Ax - b||2, where some values of x are known.
@@ -123,6 +123,73 @@ def simplify_obj_file(src):
 	with open(out_src, "w") as outfile:
 		outfile.writelines(out)
 
+## matplotlib utils
+
+def equal_3d_axes(ax, X, Y, Z, zoom=1.0):
+
+	"""Sets all axes to same lengthscale through trick found here:
+	https://stackoverflow.com/questions/13685386/matplotlib-equal-unit-length-with-equal-aspect-ratio-z-axis-is-not-equal-to"""
+
+	xmax, xmin, ymax, ymin, zmax, zmin = X.max(), X.min(), Y.max(), Y.min(), Z.max(), Z.min()
+
+	max_range = np.array([xmax - xmin, ymax - ymin, zmax - zmin]).max() / (2.0 * zoom)
+
+	mid_x = (xmax + xmin) * 0.5
+	mid_y = (ymax + ymin) * 0.5
+	mid_z = (zmax + zmin) * 0.5
+	ax.set_xlim(mid_x - max_range, mid_x + max_range)
+	ax.set_ylim(mid_y - max_range, mid_y + max_range)
+	ax.set_zlim(mid_z - max_range, mid_z + max_range)
+
+def plot_meshes(ax, verts, faces, static_verts=[], handle_verts=[], change_lims=False, color="darkcyan",
+				prop=True, zoom=1.5, n_meshes=1):
+	"""
+	:type mesh: ARAPMeshes
+	:type rots: array to prerotate a mesh by
+	"""
+
+	trisurfs = []
+
+	for n in range(n_meshes):
+		points = verts[n].detach().numpy()
+		faces = faces[n].detach().numpy()
+
+		X, Y, Z = np.rollaxis(points, -1)
+		tri = Triangulation(X, Y, triangles=faces).triangles
+
+		cmap = ListedColormap([color, "black", "red"], "mesh")  # colourmap used for showing properties on mesh
+
+		trisurf_shade = ax.plot_trisurf(X, Y, Z, triangles=tri, alpha=0.9, color=color, shade=True)  # shade entire mesh
+		trisurfs += [trisurf_shade]
+		if prop:
+			trisurf_prop = ax.plot_trisurf(X, Y, Z, triangles=tri, alpha=0.5, cmap=cmap)  # display properties of faces
+			trisurfs += [trisurf_prop]
+
+		if prop:
+			# Set colours based on handles
+			vert_prop = np.zeros((len(X))) #property of each vert - handle, static or neither
+			vert_prop[handle_verts] = 1
+			vert_prop[static_verts] = 0.5
+
+			colors = vert_prop[tri].max(axis=1) # facecolor based on maximum property of connecting verts
+			trisurf_prop.set_array(colors)
+
+
+	if change_lims: equal_3d_axes(ax, X, Y, Z, zoom=zoom)
+
+	return trisurfs
+
+def save_animation(fig, func, n_frames, fmt="gif", fps=15, title="output", **kwargs):
+	"""Save matplotlib animation."""
+
+	writer = writers['imagemagick']
+	W = writer(fps = fps, bitrate=1500)
+
+	anim = FuncAnimation(fig, func, frames=n_frames, **kwargs)
+
+	with tqdm(total=n_frames) as save_progress:
+		anim.save(os.path.join("animations", f"{title}.{fmt}"), writer=W,
+					   progress_callback=lambda x, i: save_progress.update())
 
 if __name__ == "__main__":
 
