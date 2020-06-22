@@ -4,6 +4,7 @@ from matplotlib.animation import FuncAnimation, writers
 from tqdm import tqdm
 from matplotlib.tri import Triangulation
 from matplotlib.colors import ListedColormap
+import os
 
 def is_positive_definite(tensor):
 	"""Bool check if 2D matrix is positive definite

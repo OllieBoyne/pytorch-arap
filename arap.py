@@ -1,17 +1,11 @@
 import numpy as np
 import torch
-import pytorch3d
-from pytorch3d.structures import Meshes, Textures, join_meshes_as_batch
-from pytorch3d.io import load_obj
+from pytorch3d.structures import Meshes
 from pytorch3d.loss.mesh_laplacian_smoothing import laplacian_cot
-import networkx as nx
-from pytorch3d.structures import utils as struct_utils
 from collections import defaultdict
-from time import perf_counter
-from scipy.optimize import lsq_linear
-from utils import least_sq_with_known_values, Timer, is_positive_definite, selective_svd
+from utils import least_sq_with_known_values, Timer
 from tqdm import tqdm
-from matplotlib import pyplot as plt
+
 
 def ARAP_from_meshes(meshes):
 	"""Produce ARAPMeshes object from Meshes object
@@ -57,9 +51,11 @@ class ARAPMeshes(Meshes):
 	Allows for movement of handle vertices from original mesh position, and identifies new positions of all other
 	non-static verts using the As Rigid As Possible algorithm (As-Rigid-As-Possible Surface Modeling, O. Sorkine & M. Alexa)"""
 
-	def __init__(self, verts=None, faces=None, textures=None, precompute = False):
+	def __init__(self, verts=None, faces=None, textures=None):
 		"""
 		lists of verts, faces and textures for methods. For details, see Meshes documentation
+
+		:param optimise: flag if mesh will be used for optimisation
 		"""
 
 		super().__init__(verts, faces, textures)
@@ -70,8 +66,7 @@ class ARAPMeshes(Meshes):
 		self.timer = Timer()
 
 		self.precomputed_params = {} # dictionary to store precomputed parameters
-		if precompute:
-			self.precompute_laplacian()  # Precomputed edge weights and Laplace-Beltrami operator
+
 
 	def get_one_ring_neighbours(self):
 		"""Return a dict, where key i gives a list of all neighbouring vertices (connected by exactly one edge)"""
@@ -92,13 +87,20 @@ class ARAPMeshes(Meshes):
 
 		return orn
 
-	def get_cot_padded(self):
+	def get_cot_padded(self) -> torch.Tensor:
 		"""Retrieves cotangent weights 0.5 * cot a_ij + cot b_ij for each mesh. Returns as a padded tensor.
 
-		:return cot_weights: Tensor of cotangent weights, shape (N_mesh, max(n_verts_per_mesh), max(n_verts_per_mesh))"""
+		:return cot_weights: Tensor of cotangent weights, shape (N_mesh, max(n_verts_per_mesh), max(n_verts_per_mesh))
+		:type cot_weights: Tensor"""
+
+		# w = get_cot_weights(self)
+		#
+		# return w
 
 		w_packed, _ = laplacian_cot(self)  # per-edge weightings used
-		w_packed = 0.5 * w_packed.to_dense()
+		w_packed = w_packed.to_dense()
+
+		# w_packed[w_packed<0] = 0
 
 		n = self.num_verts_per_mesh()
 		max_n = max(n.tolist())
@@ -110,37 +112,32 @@ class ARAPMeshes(Meshes):
 		for i, (start, end) in enumerate(zip(cum_n[:-1], cum_n[1:])):
 			w_padded[i] = w_packed[start:end, start:end]
 
+		return w_padded
 
 	def precompute_laplacian(self):
 		"""Precompute edge weights and Laplacian-Beltrami operator"""
 
-		n = self.num_verts_per_mesh()
+		N = self.num_verts_per_mesh()
 		p = self.verts_padded()  # undeformed mesh
 
-		# pre-factored edge weightings, and Laplace-Beltrami operator
-		w_packed, _ = laplacian_cot(self)  # per-edge weightings used
-		w_packed = 0.5 * w_packed.to_dense()
+		w_padded = self.get_cot_padded()
 
-		# diagonal L_ii = sum(w_i). non-diagonal L_ij = -w_ij
-		L_packed = torch.diag(torch.sum(w_packed, dim=1)) - w_packed
-
-		## w is packed currently. Convert to padded
-		max_n = max(n.tolist())
-		w_padded = torch.zeros((len(self), max_n, max_n))
 		L_padded = torch.zeros_like(w_padded)
 		L_inv_padded = torch.zeros_like(w_padded)
+		for n in range(len(self)):
+			w = w_padded[n]
+			# diagonal L_ii = sum(w_i). non-diagonal L_ij = -w_ij
 
-		# extract w for each mesh
-		cum_n = np.concatenate([[0], np.cumsum(n.tolist())])  # list of n_verts before and after every mesh is included
+			L_padded[n] = torch.diag(torch.sum(w, dim=1)) - w
+			# ii = np.arange(N[n])
+			# L_padded[ii] = - w_
 
-		for i, (start, end) in enumerate(zip(cum_n[:-1], cum_n[1:])):
-			w_padded[i] = w_packed[start:end, start:end]
-			L_padded[i] = L_packed[start:end, start:end]
-			L_inv_padded[i] = cholesky_invert(L_padded[i])
+			L_inv_padded[n] = torch.cholesky(L_padded[n])
 
 		self.precomputed_params["L_padded"] = L_padded
 		self.precomputed_params["w_padded"] = w_padded
 		self.precomputed_params["L_inv_padded"] = L_inv_padded
+
 
 	def precompute_reduced_laplacian(self, static_verts, handle_verts):
 		"""Precompute the Laplacian-Beltrami operator for the reduced set of vertices, negating static and handle verts"""
@@ -189,6 +186,9 @@ class ARAPMeshes(Meshes):
 
 		N = self.num_verts_per_mesh()[mesh_idx]
 		p = self.verts_padded()[mesh_idx]  # initial mesh
+
+		if "w_padded" not in self.precomputed_params:
+			self.precompute_laplacian()
 
 		w = self.precomputed_params["w_padded"][mesh_idx]
 		L = self.precomputed_params["L_padded"][mesh_idx]
@@ -260,14 +260,15 @@ class ARAPMeshes(Meshes):
 
 			# track energy
 			if track_energy:
-				E = 0
-				for i in range(N):
-					j = self.one_ring_neighbours[mesh_idx][i]
-					batch_R = R[i].unsqueeze(0).repeat(len(j), 1, 1) # convert R into batch tensor
-					stretch = torch.norm(((p_prime[i] - p_prime[j]).unsqueeze(-1) - torch.bmm(batch_R, (p[i]-p[j]).unsqueeze(-1))), p=2,dim=1).squeeze(-1)**2
-					E += torch.dot(w[i,j], stretch)
+				# E = 0
+				# for i in range(N):
+				# 	j = self.one_ring_neighbours[mesh_idx][i]
+				# 	batch_R = R[i].unsqueeze(0).repeat(len(j), 1, 1) # convert R into batch tensor
+				# 	stretch = torch.norm(((p_prime[i] - p_prime[j]).unsqueeze(-1) - torch.bmm(batch_R, (p[i]-p[j]).unsqueeze(-1))), p=2,dim=1).squeeze(-1)**2
+				# 	E += torch.dot(w[i,j], stretch)
 
-				print(f"It = {it}, Energy = {E:.2f}")
+				energy = compute_energy(self,[p], [p_prime])
+				print(f"It = {it}, Energy = {energy:.2f}")
 			# update tqdm
 			if report:
 				progress.update()
@@ -296,57 +297,131 @@ class ARAPMeshes(Meshes):
 
 		self.offset_verts_((verts_rotated - verts_0))
 
-	def compute_energy(self, offset_verts, mesh_idx = 0):
-		"""Compute the energy of a deformation for <mesh_idx> according to
+def get_cot_weights(meshes, verts=None) -> torch.Tensor:
+	"""Given a meshes object, return a padded tensor w, of shape (N_meshes, max_verts, max_verts),
+	where, for a given mesh, the tensor w:
+	w_ij = 0.5 * ( cot(alpha_ij) + cot(beta_ij) )
+	where alpha and beta are the angles on the faces adjacent to the edge, which are opposite the edge itself.
 
-		sum_i w_i * sum_j w_ij || (p'_i - p'_j) - R_i(p_i - p_j) ||^2
+	Derived from pyTorch3D's laplacian_cot method
+	"""
 
-		Where i is the vertex index,
-		j is the indices of all one-ring-neighbours
-		p gives the undeformed vertex locations
-		p' gives the deformed vertex rotations
-		and R gives the rotation matrix between p and p' that captures as much of the deformation as possible
-		(maximising the amount of deformation that is rigid)
+	n_meshes = len(meshes)
 
-		w_i gives the per-cell weight, selected as 1
-		w_ij gives the per-edge weight, selected as 0.5 * (cot (alpha_ij) + cot(beta_ij)), where alpha and beta
-		give the angles opposite of the mesh edge
+	all_n_verts = meshes.num_verts_per_mesh()
+	all_n_faces = meshes.num_faces_per_mesh()
+	max_verts = max(all_n_verts.tolist())
 
-		:param offset_verts:
-		:param mesh_idx:
+	all_faces = meshes.faces_padded()
+	if verts is None:
+		all_verts = meshes.verts_padded()
+	else:
+		all_verts = verts
 
-		:return energy: Tensor of strain energy of deformation
+	w = torch.zeros((n_meshes, max_verts, max_verts))
 
-		"""
-		N = self.num_verts_per_mesh()[mesh_idx]
-		PD = self.precomputed_params["PD"]
+	for n in range(n_meshes):
+		V, F = all_n_verts[n], all_n_faces[n]
 
-		# N = self.num_verts_per_mesh()[0]
-		# p = self.verts_padded()[0]  # undeformed verts
-		# w = self.precomputed_params["w_padded"][0]
-		#
-		# cell_size_max = max(map(len, self.one_ring_neighbours[0].values())) # maximum size of a cell
-		# PD = torch.zeros((N, 3, cell_size_max)) # This is a padded Tensor, that includes Pi * Di for each cell
-		# for i in range(N):
-		# 	j = self.one_ring_neighbours[0][i]
-		# 	Pi = (p[i] - p[j]).T
-		# 	Di = torch.diag(w[i][j])
-		# 	PD[i, :, :len(j)] = torch.mm(Pi, Di)
-		#
-		# self.precomputed_params["PD"] = PD
+		verts = all_verts[n]
+		faces = all_faces[n]
 
-		self.precompute_laplacian()
-		w_packed, _ = laplacian_cot(self)  # per-edge weightings used
-		w_packed = 0.5 * w_packed.to_dense()
+		face_verts = verts[faces] # (F x 3) of verts per face
+		v0, v1, v2 = face_verts[:, 0], face_verts[:, 1], face_verts[:, 2]
 
-		R = torch.zeros((N, 3, 3))  # Local rotations R
-		for i in range(N):
-			j = self.one_ring_neighbours[mesh_idx][i]
+		# Side lengths of each triangle, of shape (sum(F_n),)
+		# A is the side opposite v1, B is opposite v2, and C is opposite v3
+		A = (v1 - v2).norm(dim=1)
+		B = (v0 - v2).norm(dim=1)
+		C = (v0 - v1).norm(dim=1)
 
-			P_i
-			P_prime_i_T = (p_prime[i] - p_prime[j])
 
-			Si = torch.mm(PD[i, :, :len(j)], P_prime_i_T)
+		# Area of each triangle (with Heron's formula); shape is (F)
+		s = 0.5 * (A + B + C)
+		# note that the area can be negative (close to 0) causing nans after sqrt()
+		# we clip it to a small positive value
+		area = (s * (s - A) * (s - B) * (s - C)).clamp_(min=1e-12).sqrt()
 
-			Ui, _, Vi = torch.svd(Si)
-			R[i] = torch.mm(Vi, Ui.T)
+		# Compute cotangents of angles, of shape (F, 3)
+		A2, B2, C2 = A * A, B * B, C * C
+		cota = (B2 + C2 - A2) / area
+		cotb = (A2 + C2 - B2) / area
+		cotc = (A2 + B2 - C2) / area
+		cot = torch.stack([cota, cotb, cotc], dim=1)
+		cot /= 4.0
+
+		i = faces[:, [0, 1, 2]].view(-1)  # flattened tensor of by face, v0, v1, v2
+		j = faces[:, [1, 2, 0]].view(-1)  # flattened tensor of by face, v1, v2, v0
+
+		# flatten cot, such that the following line sets
+		# w_ij = 0.5 * cot a_ij
+		w[n][i, j] = cot.view(-1)
+		# to include b_ij, simply add the transpose to itself
+		w[n] += w[n].T
+
+		#####
+		ii = faces[:, [1, 2, 0]]
+		jj = faces[:, [2, 0, 1]]
+		idx = torch.stack([ii, jj], dim=0).view(2, F * 3)
+		L = torch.sparse.FloatTensor(idx, cot.view(-1), (V, V))
+		L += L.t()
+		w[n] = L.to_dense()
+
+	return w
+
+def compute_energy(meshes: ARAPMeshes, verts: torch.Tensor, verts_deformed: torch.Tensor, mesh_idx = 0):
+	"""Compute the energy of a deformation for a deformation, according to
+
+	sum_i w_i * sum_j w_ij || (p'_i - p'_j) - R_i(p_i - p_j) ||^2
+
+	Where i is the vertex index,
+	j is the indices of all one-ring-neighbours
+	p gives the undeformed vertex locations
+	p' gives the deformed vertex rotations
+	and R gives the rotation matrix between p and p' that captures as much of the deformation as possible
+	(maximising the amount of deformation that is rigid)
+
+	w_i gives the per-cell weight, selected as 1
+	w_ij gives the per-edge weight, selected as 0.5 * (cot (alpha_ij) + cot(beta_ij)), where alpha and beta
+	give the angles opposite of the mesh edge
+
+	:param meshes: ARAP meshes object
+	:param verts_deformed:
+	:param verts:
+
+	:return energy: Tensor of strain energy of deformation
+
+	"""
+
+	N = meshes.num_verts_per_mesh()[mesh_idx]
+	w = get_cot_weights(meshes, verts)[mesh_idx]
+
+	p = verts[mesh_idx]  # initial mesh
+	p_prime = verts_deformed[mesh_idx] # displaced verts
+
+	R = torch.zeros((N, 3, 3))  # Local rotations R
+	for i in range(N):
+		j = meshes.one_ring_neighbours[0][i]
+
+		P_i = (p[i] - p[j]).T
+		D_i = torch.diag(w[i,j])
+		P_prime_i_T = (p_prime[i] - p_prime[j])
+
+		Si = torch.mm(P_i, torch.mm(D_i, P_prime_i_T))
+
+		Ui, _, Vi = torch.svd(Si)
+		R[i] = torch.mm(Vi, Ui.T)
+
+	energy = 0
+	for i in range(N):
+		j = meshes.one_ring_neighbours[0][i]
+
+		batch_R = R[i].unsqueeze(0).repeat(len(j), 1, 1)  # convert R into batch tensor
+		stretch = torch.norm(
+			((p_prime[i] - p_prime[j]).unsqueeze(-1) - torch.bmm(batch_R, (p[i] - p[j]).unsqueeze(-1))), p=2,
+			dim=1).squeeze(-1)
+
+		E = torch.dot(w[i, j], stretch)
+		energy += E
+
+	return energy

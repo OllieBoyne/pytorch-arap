@@ -2,7 +2,7 @@ from matplotlib import pyplot as plt
 
 import numpy as np
 
-from solver import ARAPMeshes, ARAP_from_meshes, add_one_ring_neighbours,add_n_ring_neighbours
+from arap import ARAPMeshes, ARAP_from_meshes, add_one_ring_neighbours,add_n_ring_neighbours, compute_energy
 from pytorch3d.io import load_obj, load_objs_as_meshes
 from pytorch3d.utils import ico_sphere
 import os
@@ -136,7 +136,7 @@ def deform_cactus():
 	disp_frac = 0.4 # fraction of full disp_vec to move in animation
 	step = disp_frac * 4/n_frames # moves
 
-	nits = 1
+	nits = 10
 	def anim(i):
 		[x.remove() for x in trisurfs] # remove previous frame's mesh
 
@@ -149,17 +149,18 @@ def deform_cactus():
 
 		## deform, replot
 		verts = meshes.solve(static_verts=static_verts, handle_verts=handle_verts, handle_verts_pos=handle_pos_shifted, n_its = nits,
-					 track_energy=False) ## run ARAP
+					 track_energy=True) ## run ARAP
+		print("----")
 
 		verts = [verts]
 
 		trisurfs[:] = plot_meshes(ax, verts, faces, handle_verts=handle_verts, static_verts=static_verts, prop=prop,
 								  color="gray")
 
-	# [anim(i) for i in range(10)]
+	[anim(i) for i in range(10)]
 	# anim(0)
-	f = 1
-	n_unknown = N - len(static_verts) - len(handle_verts)
+	# f = 1
+	# n_unknown = N - len(static_verts) - len(handle_verts)
 	# [anim(i) for i in range(f)]
 
 	# print(meshes.timer.report(nits=f, rots=f*nits, b1=f*nits, b2=f*nits, b3=f*nits))
@@ -289,8 +290,8 @@ if __name__ == "__main__":
 
 	# deform_cuboid()
 	# deform_sphere()
-	deform_smal()
-	# deform_cactus()
+	# deform_smal()
+	deform_cactus()
 
 
 
