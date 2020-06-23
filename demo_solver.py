@@ -8,7 +8,7 @@ from pytorch3d.utils import ico_sphere
 import os
 import torch
 
-from utils import save_animation, plot_meshes
+from arap_utils import save_animation, plot_meshes
 
 def deform_cuboid():
 	targ = os.path.join("sample_meshes", "cuboid_hp.obj")
@@ -157,7 +157,7 @@ def deform_cactus():
 		trisurfs[:] = plot_meshes(ax, verts, faces, handle_verts=handle_verts, static_verts=static_verts, prop=prop,
 								  color="gray")
 
-	[anim(i) for i in range(10)]
+	[anim(i) for i in range(1)]
 	# anim(0)
 	# f = 1
 	# n_unknown = N - len(static_verts) - len(handle_verts)

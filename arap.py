@@ -3,7 +3,7 @@ import torch
 from pytorch3d.structures import Meshes
 from pytorch3d.loss.mesh_laplacian_smoothing import laplacian_cot
 from collections import defaultdict
-from .utils import least_sq_with_known_values, Timer
+from arap_utils import least_sq_with_known_values, Timer
 from tqdm import tqdm
 
 import sys
@@ -371,6 +371,7 @@ def get_cot_weights(meshes, verts=None) -> torch.Tensor:
 
 	return w
 
+from time import perf_counter
 def compute_energy(meshes: ARAPMeshes, verts: torch.Tensor, verts_deformed: torch.Tensor, mesh_idx = 0):
 	"""Compute the energy of a deformation for a deformation, according to
 
