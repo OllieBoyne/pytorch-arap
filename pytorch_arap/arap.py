@@ -6,7 +6,7 @@ from collections import defaultdict
 
 import sys
 sys.path.append("../")
-from arap_utils import least_sq_with_known_values, Timer
+from .arap_utils import least_sq_with_known_values, Timer
 from tqdm import tqdm
 
 

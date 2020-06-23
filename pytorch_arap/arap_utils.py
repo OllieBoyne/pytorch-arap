@@ -194,5 +194,5 @@ def save_animation(fig, func, n_frames, fmt="gif", fps=15, title="output", **kwa
 
 if __name__ == "__main__":
 
-	simplify_obj_file("sample_meshes/smal.obj")
+	simplify_obj_file("../sample_meshes/smal.obj")
 

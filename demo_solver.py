@@ -2,13 +2,13 @@ from matplotlib import pyplot as plt
 
 import numpy as np
 
-from arap import ARAPMeshes, ARAP_from_meshes, add_one_ring_neighbours,add_n_ring_neighbours, compute_energy
-from pytorch3d.io import load_obj, load_objs_as_meshes
+from pytorch_arap.arap import ARAP_from_meshes, add_one_ring_neighbours,add_n_ring_neighbours
+from pytorch3d.io import load_objs_as_meshes
 from pytorch3d.utils import ico_sphere
 import os
 import torch
 
-from arap_utils import save_animation, plot_meshes
+from pytorch_arap.arap_utils import save_animation, plot_meshes
 
 def deform_cuboid():
 	targ = os.path.join("sample_meshes", "cuboid_hp.obj")
