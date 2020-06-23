@@ -3,9 +3,11 @@ import torch
 from pytorch3d.structures import Meshes
 from pytorch3d.loss.mesh_laplacian_smoothing import laplacian_cot
 from collections import defaultdict
-from utils import least_sq_with_known_values, Timer
+from .utils import least_sq_with_known_values, Timer
 from tqdm import tqdm
 
+import sys
+sys.path.append("../")
 
 def ARAP_from_meshes(meshes):
 	"""Produce ARAPMeshes object from Meshes object
