@@ -152,6 +152,7 @@ def deform_cactus():
 					 track_energy=True) ## run ARAP
 		print("----")
 
+
 		verts = [verts]
 
 		trisurfs[:] = plot_meshes(ax, verts, faces, handle_verts=handle_verts, static_verts=static_verts, prop=prop,
@@ -290,8 +291,8 @@ if __name__ == "__main__":
 
 	# deform_cuboid()
 	# deform_sphere()
-	# deform_smal()
-	deform_cactus()
+	deform_smal()
+	# deform_cactus()
 
 
 
