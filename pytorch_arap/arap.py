@@ -327,63 +327,6 @@ def compute_energy(meshes: ARAPMeshes, verts: torch.Tensor, verts_deformed: torc
 	"""
 
 	N = meshes.num_verts_per_mesh()[mesh_idx]
-	w = laplacian_cot(meshes)[0] / 2
-
-	p = verts[mesh_idx]  # initial mesh
-	p_prime = verts_deformed[mesh_idx] # displaced verts
-
-	R = torch.zeros((N, 3, 3))  # Local rotations R
-	for i in range(N):
-		j = meshes.one_ring_neighbours[0][i]
-
-		P_i = (p[i] - p[j]).T
-		D_i = torch.diag(w[i,j])
-		P_prime_i_T = (p_prime[i] - p_prime[j])
-
-		Si = torch.mm(P_i, torch.mm(D_i, P_prime_i_T))
-
-		Ui, _, Vi = torch.svd(Si)
-		R[i] = torch.mm(Vi, Ui.T)
-
-	energy = 0
-	for i in range(N):
-		j = meshes.one_ring_neighbours[0][i]
-
-		batch_R = R[i].unsqueeze(0).repeat(len(j), 1, 1)  # convert R into batch tensor
-		stretch = torch.norm(
-			((p_prime[i] - p_prime[j]).unsqueeze(-1) - torch.bmm(batch_R, (p[i] - p[j]).unsqueeze(-1))), p=2,
-			dim=1).squeeze(-1)
-
-		E = torch.dot(w[i, j], stretch)
-		energy += E
-
-	return energy
-
-def compute_energy_new(meshes: ARAPMeshes, verts: torch.Tensor, verts_deformed: torch.Tensor, mesh_idx = 0):
-	"""Compute the energy of a deformation for a deformation, according to
-
-	sum_i w_i * sum_j w_ij || (p'_i - p'_j) - R_i(p_i - p_j) ||^2
-
-	Where i is the vertex index,
-	j is the indices of all one-ring-neighbours
-	p gives the undeformed vertex locations
-	p' gives the deformed vertex rotations
-	and R gives the rotation matrix between p and p' that captures as much of the deformation as possible
-	(maximising the amount of deformation that is rigid)
-
-	w_i gives the per-cell weight, selected as 1
-	w_ij gives the per-edge weight, selected as 0.5 * (cot (alpha_ij) + cot(beta_ij)), where alpha and beta
-	give the angles opposite of the mesh edge
-
-	:param meshes: ARAP meshes object
-	:param verts_deformed:
-	:param verts:
-
-	:return energy: Tensor of strain energy of deformation
-
-	"""
-
-	N = meshes.num_verts_per_mesh()[mesh_idx]
 	w = get_cot_weights(meshes)
 
 	p = verts[mesh_idx]  # initial mesh
@@ -413,6 +356,5 @@ def compute_energy_new(meshes: ARAPMeshes, verts: torch.Tensor, verts_deformed: 
 
 		E = torch.dot(w[i, j], stretch)
 		energy += E
-
 
 	return energy

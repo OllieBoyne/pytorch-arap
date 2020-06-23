@@ -4,7 +4,7 @@
 
 import numpy as np
 from pytorch_arap.arap import ARAP_from_meshes, add_one_ring_neighbours,add_n_ring_neighbours
-from pytorch_arap.arap import compute_energy_new as arap_loss
+from pytorch_arap.arap import compute_energy as arap_loss
 from pytorch3d.io import load_objs_as_meshes
 import os
 import torch
