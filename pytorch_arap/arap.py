@@ -301,7 +301,6 @@ def get_cot_weights(meshes):
 
 	return w
 
-from time import perf_counter
 def compute_energy(meshes: ARAPMeshes, verts: torch.Tensor, verts_deformed: torch.Tensor, mesh_idx = 0):
 	"""Compute the energy of a deformation for a deformation, according to
 
