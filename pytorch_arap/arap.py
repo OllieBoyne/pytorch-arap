@@ -303,8 +303,8 @@ def get_cot_weights(meshes) -> torch.Tensor:
 	"""Given a meshes object, return packed tensor of cotangent weights, where
 	w_ij = 0.5 * (alpha_ij + beta_ij)"""
 
-	w = laplacian_cot(meshes)[0] / 2
-	w = w.to_dense()
+	w = laplacian_cot(meshes)[0]
+	w = w.to_dense() / 2
 
 	## split to padded
 	n = meshes.num_verts_per_mesh()
@@ -370,7 +370,7 @@ def get_cot_weights_full(meshes, verts=None) -> torch.Tensor:
 
 		# flatten cot, such that the following line sets
 		# w_ij = 0.5 * cot a_ij
-		w[n][i, j] = cot.view(-1)
+		w[n][i, j] = 0.5 * cot.view(-1)
 		# to include b_ij, simply add the transpose to itself
 		w[n] += w[n].T
 
@@ -413,7 +413,7 @@ def compute_energy(meshes: ARAPMeshes, verts: torch.Tensor, verts_deformed: torc
 	"""
 
 	N = meshes.num_verts_per_mesh()[mesh_idx]
-	w = get_cot_weights(meshes)[mesh_idx]
+	w = get_cot_weights_full(meshes, verts)[mesh_idx]
 
 	p = verts[mesh_idx]  # initial mesh
 	p_prime = verts_deformed[mesh_idx] # displaced verts
@@ -427,10 +427,15 @@ def compute_energy(meshes: ARAPMeshes, verts: torch.Tensor, verts_deformed: torc
 
 		P_i = (p[i] - p[J]).T
 		D_i = torch.diag(w[i,J])
-		P_prime_i_T = (p_prime[i] - p_prime[J])
+		P_prime_i = (p_prime[i] - p_prime[J]).T
+
+		## in the case of no deflection, set R = I. This is to avoid numerical errors
+		if torch.equal(P_i, P_prime_i):
+			R[i] = torch.eye(3)
+			continue
 
 		# Get rigid rotation that maximises Tr(R * (PDP'))
-		Si = torch.mm(P_i, torch.mm(D_i, P_prime_i_T))
+		Si = torch.mm(P_i, torch.mm(D_i, P_prime_i.T))
 		Ui, sig, Vi = torch.svd(Si)
 
 		Ri = torch.mm(Vi, Ui.T)
@@ -440,13 +445,19 @@ def compute_energy(meshes: ARAPMeshes, verts: torch.Tensor, verts_deformed: torc
 			col_flip = (sig == sig.min()).nonzero()[0, 0]
 			Ui_mod = Ui.clone()
 			Ui_mod[:, col_flip] *= -1
-			R[i] = torch.mm(Vi, Ui.T)
+			R[i] = torch.mm(Vi, Ui_mod.T)
 
 		else:
 			R[i] = Ri
 
+	def sparse_dense_mul(s, d):
+		i = s._indices()
+		v = s._values()
+		dv = d[i[0, :], i[1, :]]  # get values from relevant entries of dense matrix
+		return torch.sparse.FloatTensor(i, v * dv, s.size())
+
 	stretch = P_prime - torch.bmm(R, P.permute(0, 2, 1)).permute(0, 2, 1)
-	stretch_norm = torch.norm(stretch, dim=2)  # norm over (x,y,z) space
+	stretch_norm = torch.norm(stretch, dim=2)**2  # norm over (x,y,z) space
 	energy = (w * stretch_norm).sum() # element wise multiplication
 
 	return energy

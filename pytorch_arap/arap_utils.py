@@ -184,7 +184,7 @@ def plot_meshes(ax, verts, faces, static_verts=[], handle_verts=[], change_lims=
 
 	return trisurfs
 
-def save_animation(fig, func, n_frames, fmt="gif", fps=15, title="output", **kwargs):
+def save_animation(fig, func, n_frames, fmt="gif", fps=15, title="output", callback=True, **kwargs):
 	"""Save matplotlib animation."""
 
 	writer = writers['imagemagick']
@@ -195,9 +195,20 @@ def save_animation(fig, func, n_frames, fmt="gif", fps=15, title="output", **kwa
 	out_dir = "animations"
 	trymkdir(out_dir)
 
-	with tqdm(total=n_frames) as save_progress:
-		anim.save(os.path.join(out_dir, f"{title}.{fmt}"), writer=W,
-					   progress_callback=lambda x, i: save_progress.update())
+	if callback:
+		with tqdm(total=n_frames) as save_progress:
+			anim.save(os.path.join(out_dir, f"{title}.{fmt}"), writer=W,
+						   progress_callback=lambda x, i: save_progress.update())
+
+	else:
+		anim.save(os.path.join(out_dir, f"{title}.{fmt}"), writer=W) # no tqdm
+
+def profile_backwards(loss):
+	"""Profiles and prints report of loss.backwards"""
+	with torch.autograd.profiler.profile() as prof:
+		loss.backward()
+
+	print(prof.key_averages().table(sort_by="self_cpu_time_total"))
 
 if __name__ == "__main__":
 

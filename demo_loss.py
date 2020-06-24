@@ -1,7 +1,5 @@
 """Demos the use of ARAP energy as a loss function"""
 
-
-
 import numpy as np
 from pytorch_arap.arap import ARAP_from_meshes, add_one_ring_neighbours,add_n_ring_neighbours
 from pytorch_arap.arap import compute_energy as arap_loss
@@ -10,71 +8,106 @@ import os
 import torch
 from matplotlib import pyplot as plt
 
-from pytorch_arap.arap_utils import save_animation, plot_meshes
+from pytorch_arap.arap_utils import save_animation, plot_meshes, profile_backwards
+from tqdm import tqdm
+
+class Model(torch.nn.Module):
+	"""Verts to be optimised"""
+
+	def __init__(self, meshes, verts):
+
+		super().__init__()
+
+		self.verts_template = verts
+		self.meshes = meshes
+
+		self.verts = torch.nn.Parameter(verts.clone())
+
+		self.handle_verts = None
+		self.handle_pos = None
+
+	def set_target(self, handle_verts, handle_pos):
+		self.handle_verts = handle_verts
+		self.handle_pos = handle_pos
+
+	def forward(self):
+
+		loss_target = torch.nn.functional.mse_loss(self.verts[0,self.handle_verts], self.handle_pos)
+		loss_arap = arap_loss(self.meshes, self.verts_template, self.verts)
+
+		loss = loss_target + 0.001 * loss_arap
+
+		# print(loss_target, loss_arap, ((self.verts_template-self.verts)**2).mean() )
+
+		return loss
 
 def deform_smal():
-	with torch.no_grad():
 
-		targ = os.path.join("sample_meshes", "smal.obj")
-		meshes = load_objs_as_meshes([targ], load_textures=False)
-		meshes = ARAP_from_meshes(meshes) # convert to ARAP obejct
-		N = meshes.num_verts_per_mesh()[0]
+	targ = os.path.join("sample_meshes", "smal.obj")
+	meshes = load_objs_as_meshes([targ], load_textures=False)
+	meshes = ARAP_from_meshes(meshes) # convert to ARAP obejct
+	N = meshes.num_verts_per_mesh()[0]
 
-		meshes.rotate(mesh_idx=0, rot_x=np.pi/2)
+	meshes.rotate(mesh_idx=0, rot_x=np.pi/2)
 
-		# handle as topmost vert
-		handle_verts = [28] # [79]
-		handle_verts = add_one_ring_neighbours(meshes, handle_verts)
-		handle_pos = meshes.verts_padded()[0][handle_verts]
-		handle_pos_shifted = handle_pos.clone()
+	# handle as topmost vert
+	handle_verts = [28] # [79]
+	handle_verts = add_one_ring_neighbours(meshes, handle_verts)
+	handle_pos = meshes.verts_padded()[0][handle_verts]
+	handle_pos_shifted = handle_pos.clone()
 
-		# static as base
-		static_verts = [1792, 3211, 95, 3667] # centres of paws
-		static_verts = add_n_ring_neighbours(meshes, static_verts, n = 6)
+	# static as base
+	static_verts = [1792, 3211, 95, 3667] # centres of paws
+	static_verts = add_n_ring_neighbours(meshes, static_verts, n = 6)
 
-		faces = meshes.faces_list()
+	faces = meshes.faces_list()
 
-		prop = True
-		trisurfs = plot_meshes(ax, meshes.verts_list(), faces, handle_verts=handle_verts, static_verts=static_verts, prop=prop, change_lims=True,
-							   color="gray", zoom=1.5)
+	prop = True
+	trisurfs = plot_meshes(ax, meshes.verts_list(), faces, handle_verts=handle_verts, static_verts=static_verts, prop=prop, change_lims=True,
+						   color="gray", zoom=1.5)
 
-		disp_vec = torch.FloatTensor([1, 0, 0])  # displace in x direction
+	disp_vec = torch.FloatTensor([1, 0, 0])  # displace in x direction
 
-		n_frames = 100
-		disp_frac = 0.2 # fraction of full disp_vec to move in animation
-		step = disp_frac * 4/n_frames # moves
+	disp_frac = 0.6 # fraction of full disp_vec to move in animation
+	step = disp_frac # moves
+
+	handle_pos_shifted[:] += step * disp_vec
+
+	verts_template = meshes.verts_padded()
+
+	model = Model(meshes, verts_template)
+	model.set_target(handle_verts, handle_pos_shifted)
+
+	model()
+
+	optimiser = torch.optim.Adam(model.parameters(), lr = 1e-3)#5e-3)
+
+	n_frames = 100
+	progress = tqdm(total=n_frames)
+
+	def anim(i):
+		[x.remove() for x in trisurfs] # remove previous frame's mesh
+
+		optimiser.zero_grad()
+		loss = model()
 
 
-		handle_pos_shifted[:] += step * disp_vec
+		profile_backwards(loss)
+		optimiser.step()
 
-		## deform, replot
-		verts = meshes.solve(static_verts=static_verts, handle_verts=handle_verts, handle_verts_pos=handle_pos_shifted, n_its = 1,
-					 track_energy=False) ## run ARAP
+		trisurfs[:] = plot_meshes(ax, model.verts, faces, handle_verts=handle_verts, static_verts=static_verts, prop=prop,
+								  color="gray")
 
-		verts_template = meshes.verts_padded()
-		verts = verts.unsqueeze(0)
+		progress.n = i+1
+		progress.last_print_n = i+1
 
-	verts.requires_grad = True
+		progress.set_description(f"Vert_disp = {((model.verts_template-model.verts)**2).sum():.4f}")
 
-	from time import perf_counter
-	print("STARTING FORWARD")
-	t0 = perf_counter()
+	# anim(1)
+	# ax.axis("off")
+	# plt.show()
 
-	loss = arap_loss(meshes, verts_template, verts)
-
-	print(f"FINISHED FORWARD {(perf_counter()-t0)*1000:.2f}ms")
-	print("STARTING BACKWARD")
-	t0 = perf_counter()
-
-	with torch.autograd.profiler.profile() as prof:
-		loss.backward()
-		print(f"FINISHED BACKWARD {(perf_counter()-t0)*1000:.2f}ms")
-	print(prof.key_averages().table(sort_by="self_cpu_time_total"))
-
-	trisurfs[:] = plot_meshes(ax, verts, faces, handle_verts=handle_verts, static_verts=static_verts, prop=prop,
-							  color="gray")
-
-	ax.axis("off")
+	save_animation(fig, anim, n_frames, fmt="gif", fps=15, title="smal_arap_lossfit", callback=False)
 
 if __name__ == "__main__":
 
