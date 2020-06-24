@@ -376,6 +376,18 @@ def get_cot_weights_full(meshes, verts=None) -> torch.Tensor:
 
 	return w
 
+
+def produce_edge_matrix(verts: torch.Tensor) -> torch.Tensor:
+	"""Given a tensor of verts postion, p (V x 3), produce a tensor E, where
+	E_ij = p_i - p_j"""
+
+	V, _ = verts.shape
+	pi = verts.unsqueeze(0).repeat(V, 1, 1) # tensor where each row is the same
+	pj = pi.permute(1, 0, 2) # tensor where each column is the same
+
+	E = pi - pj
+	return E
+
 def compute_energy(meshes: ARAPMeshes, verts: torch.Tensor, verts_deformed: torch.Tensor, mesh_idx = 0):
 	"""Compute the energy of a deformation for a deformation, according to
 
@@ -406,6 +418,9 @@ def compute_energy(meshes: ARAPMeshes, verts: torch.Tensor, verts_deformed: torc
 	p = verts[mesh_idx]  # initial mesh
 	p_prime = verts_deformed[mesh_idx] # displaced verts
 
+	P = produce_edge_matrix(p)
+	P_prime = produce_edge_matrix(p_prime)
+
 	R = torch.zeros((N, 3, 3))  # Local rotations R
 	for i in range(N):
 		J = meshes.one_ring_neighbours[0][i]
@@ -430,12 +445,8 @@ def compute_energy(meshes: ARAPMeshes, verts: torch.Tensor, verts_deformed: torc
 		else:
 			R[i] = Ri
 
-	energy = 0
-	for i in range(N):
-		J = meshes.one_ring_neighbours[0][i]
-
-		for j in J:
-			stretch = torch.norm( (p_prime[i] - p_prime[j]) - torch.mv(R[i], (p[i] - p[j])))
-			energy += w[i,j] * stretch
+	stretch = P_prime - torch.bmm(R, P.permute(0, 2, 1)).permute(0, 2, 1)
+	stretch_norm = torch.norm(stretch, dim=2)  # norm over (x,y,z) space
+	energy = (w * stretch_norm).sum() # element wise multiplication
 
 	return energy
