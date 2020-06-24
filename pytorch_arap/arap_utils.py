@@ -6,6 +6,10 @@ from matplotlib.tri import Triangulation
 from matplotlib.colors import ListedColormap
 import os
 
+def trymkdir(loc):
+	if not os.path.isdir(loc):
+		os.mkdir(loc)
+
 def is_positive_definite(tensor):
 	"""Bool check if 2D matrix is positive definite
 
@@ -188,8 +192,11 @@ def save_animation(fig, func, n_frames, fmt="gif", fps=15, title="output", **kwa
 
 	anim = FuncAnimation(fig, func, frames=n_frames, **kwargs)
 
+	out_dir = "animations"
+	trymkdir(out_dir)
+
 	with tqdm(total=n_frames) as save_progress:
-		anim.save(os.path.join("animations", f"{title}.{fmt}"), writer=W,
+		anim.save(os.path.join(out_dir, f"{title}.{fmt}"), writer=W,
 					   progress_callback=lambda x, i: save_progress.update())
 
 if __name__ == "__main__":

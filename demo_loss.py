@@ -53,19 +53,26 @@ def deform_smal():
 	verts_template = meshes.verts_padded()
 	verts = verts.unsqueeze(0)
 
-	verts_template.requires_grad = True
+	verts_template.requires_grad = False
 	verts.requires_grad = True
 
+	from time import perf_counter
+	print("STARTING FORWARD")
+	t0 = perf_counter()
+
 	loss = arap_loss(meshes, verts_template, verts)
+
+	print(f"FINISHED FORWARD {(perf_counter()-t0)*1000:.2f}ms")
 	print("STARTING BACKWARD")
+	t0 = perf_counter()
+
 	loss.backward()
-	print("FINISHED BACKWARD")
+	print(f"FINISHED BACKWARD {(perf_counter()-t0)*1000:.2f}ms")
 
 	trisurfs[:] = plot_meshes(ax, verts, faces, handle_verts=handle_verts, static_verts=static_verts, prop=prop,
 							  color="gray")
 
 	ax.axis("off")
-	# plt.show()
 
 if __name__ == "__main__":
 

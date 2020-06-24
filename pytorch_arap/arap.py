@@ -236,9 +236,18 @@ class ARAPMeshes(Meshes):
 				P_prime_i_T = (p_prime[i] - p_prime[j])
 
 				Si = torch.mm(PD[i, :, :len(j)], P_prime_i_T)
+				Ui, sig, Vi = torch.svd(Si)
+				Ri = torch.mm(Vi, Ui.T)
 
-				Ui, _, Vi = torch.svd(Si)
-				R[i] = torch.mm(Vi, Ui.T)
+				if torch.det(Ri) <= 0:
+					# Flip column of Ui corresponding to smallest singular value (ensures det(Ri)>0)
+					col_flip = (sig == sig.min()).nonzero()[0, 0]
+					Ui_mod = Ui.clone()
+					Ui_mod[:, col_flip] *= -1
+					R[i] = torch.mm(Vi, Ui.T)
+
+				else:
+					R[i] = Ri
 
 			b = torch.zeros((N, 3)) # RHS of minimum energy equation, with known p's removed
 			for i in unknown_verts:
@@ -259,9 +268,7 @@ class ARAPMeshes(Meshes):
 
 			# track energy
 			if track_energy:
-				t0=perf_counter()
 				energy = compute_energy(self,[p], [p_prime])
-				print("E time", perf_counter()-t0)
 				print(f"It = {it}, Energy = {energy:.2f}")
 			# update tqdm
 			if report:
@@ -292,12 +299,80 @@ class ARAPMeshes(Meshes):
 		self.offset_verts_((verts_rotated - verts_0))
 
 
-def get_cot_weights(meshes):
+def get_cot_weights(meshes) -> torch.Tensor:
 	"""Given a meshes object, return packed tensor of cotangent weights, where
 	w_ij = 0.5 * (alpha_ij + beta_ij)"""
 
 	w = laplacian_cot(meshes)[0] / 2
 	w = w.to_dense()
+
+	## split to padded
+	n = meshes.num_verts_per_mesh()
+	w_padded = torch.zeros((len(meshes), n.max(), n.max()))
+	cum_n = np.concatenate([[0], np.cumsum(n.tolist())])  # list of n_verts before and after every mesh is included
+
+	for i, (start, end) in enumerate(zip(cum_n[:-1], cum_n[1:])):
+		w_padded[i] = w[start:end, start:end]
+
+	return w_padded
+
+def get_cot_weights_full(meshes, verts=None) -> torch.Tensor:
+	"""Given a meshes object, return a padded tensor w, of shape (N_meshes, max_verts, max_verts),
+	where, for a given mesh, the tensor w:
+	w_ij = 0.5 * ( cot(alpha_ij) + cot(beta_ij) )
+	where alpha and beta are the angles on the faces adjacent to the edge, which are opposite the edge itself.
+
+	Derived from pyTorch3D's laplacian_cot method"""
+
+	n_meshes = len(meshes)
+	all_n_verts = meshes.num_verts_per_mesh()
+	all_n_faces = meshes.num_faces_per_mesh()
+	max_verts = max(all_n_verts.tolist())
+
+	all_faces = meshes.faces_padded()
+	if verts is None:
+		all_verts = meshes.verts_padded()
+	else:
+		all_verts = verts
+
+	w = torch.zeros((n_meshes, max_verts, max_verts))
+
+	for n in range(n_meshes):
+		V, F = all_n_verts[n], all_n_faces[n]
+		verts = all_verts[n]
+		faces = all_faces[n]
+
+		face_verts = verts[faces]  # (F x 3) of verts per face
+		v0, v1, v2 = face_verts[:, 0], face_verts[:, 1], face_verts[:, 2]
+
+		# Side lengths of each triangle, of shape (sum(F_n),)
+		# A is the side opposite v1, B is opposite v2, and C is opposite v3
+		A = (v1 - v2).norm(dim=1)
+		B = (v0 - v2).norm(dim=1)
+		C = (v0 - v1).norm(dim=1)
+
+		# Area of each triangle (with Heron's formula); shape is (F)
+		s = 0.5 * (A + B + C)
+		# note that the area can be negative (close to 0) causing nans after sqrt()
+		# we clip it to a small positive value
+		area = (s * (s - A) * (s - B) * (s - C)).clamp_(min=1e-12).sqrt()
+
+		# Compute cotangents of angles, of shape (F, 3)
+		A2, B2, C2 = A * A, B * B, C * C
+		cota = (B2 + C2 - A2) / area
+		cotb = (A2 + C2 - B2) / area
+		cotc = (A2 + B2 - C2) / area
+		cot = torch.stack([cota, cotb, cotc], dim=1)
+		cot /= 4.0
+
+		i = faces[:, [0, 1, 2]].view(-1)  # flattened tensor of by face, v0, v1, v2
+		j = faces[:, [1, 2, 0]].view(-1)  # flattened tensor of by face, v1, v2, v0
+
+		# flatten cot, such that the following line sets
+		# w_ij = 0.5 * cot a_ij
+		w[n][i, j] = cot.view(-1)
+		# to include b_ij, simply add the transpose to itself
+		w[n] += w[n].T
 
 	return w
 
@@ -326,34 +401,41 @@ def compute_energy(meshes: ARAPMeshes, verts: torch.Tensor, verts_deformed: torc
 	"""
 
 	N = meshes.num_verts_per_mesh()[mesh_idx]
-	w = get_cot_weights(meshes)
+	w = get_cot_weights(meshes)[mesh_idx]
 
 	p = verts[mesh_idx]  # initial mesh
 	p_prime = verts_deformed[mesh_idx] # displaced verts
 
 	R = torch.zeros((N, 3, 3))  # Local rotations R
 	for i in range(N):
-		j = meshes.one_ring_neighbours[0][i]
+		J = meshes.one_ring_neighbours[0][i]
 
-		P_i = (p[i] - p[j]).T
-		D_i = torch.diag(w[i,j])
-		P_prime_i_T = (p_prime[i] - p_prime[j])
+		P_i = (p[i] - p[J]).T
+		D_i = torch.diag(w[i,J])
+		P_prime_i_T = (p_prime[i] - p_prime[J])
 
+		# Get rigid rotation that maximises Tr(R * (PDP'))
 		Si = torch.mm(P_i, torch.mm(D_i, P_prime_i_T))
+		Ui, sig, Vi = torch.svd(Si)
 
-		Ui, _, Vi = torch.svd(Si)
-		R[i] = torch.mm(Vi, Ui.T)
+		Ri = torch.mm(Vi, Ui.T)
+
+		if torch.det(Ri) <= 0:
+			# Flip column of Ui corresponding to smallest singular value (ensures det(Ri)>0)
+			col_flip = (sig == sig.min()).nonzero()[0, 0]
+			Ui_mod = Ui.clone()
+			Ui_mod[:, col_flip] *= -1
+			R[i] = torch.mm(Vi, Ui.T)
+
+		else:
+			R[i] = Ri
 
 	energy = 0
 	for i in range(N):
-		j = meshes.one_ring_neighbours[0][i]
+		J = meshes.one_ring_neighbours[0][i]
 
-		batch_R = R[i].unsqueeze(0).repeat(len(j), 1, 1)  # convert R into batch tensor
-		stretch = torch.norm(
-			((p_prime[i] - p_prime[j]).unsqueeze(-1) - torch.bmm(batch_R, (p[i] - p[j]).unsqueeze(-1))), p=2,
-			dim=1).squeeze(-1)
-
-		E = torch.dot(w[i, j], stretch)
-		energy += E
+		for j in J:
+			stretch = torch.norm( (p_prime[i] - p_prime[j]) - torch.mv(R[i], (p[i] - p[j])))
+			energy += w[i,j] * stretch
 
 	return energy

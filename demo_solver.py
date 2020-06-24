@@ -198,7 +198,7 @@ def deform_smal():
 
 	disp_vec = torch.FloatTensor([1, 0, 0])  # displace in x direction
 
-	n_frames = 100
+	n_frames = 10
 	disp_frac = 0.2 # fraction of full disp_vec to move in animation
 	step = disp_frac * 4/n_frames # moves
 
