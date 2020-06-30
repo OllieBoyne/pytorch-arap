@@ -147,7 +147,7 @@ def equal_3d_axes(ax, X, Y, Z, zoom=1.0):
 	ax.set_zlim(mid_z - max_range, mid_z + max_range)
 
 def plot_meshes(ax, verts, faces, static_verts=[], handle_verts=[], change_lims=False, color="darkcyan",
-				prop=True, zoom=1.5, n_meshes=1):
+				prop=True, zoom=1.5, n_meshes=1, alpha=1.0):
 	"""
 	:type mesh: ARAPMeshes
 	:type rots: array to prerotate a mesh by
@@ -164,7 +164,7 @@ def plot_meshes(ax, verts, faces, static_verts=[], handle_verts=[], change_lims=
 
 		cmap = ListedColormap([color, "black", "red"], "mesh")  # colourmap used for showing properties on mesh
 
-		trisurf_shade = ax.plot_trisurf(X, Y, Z, triangles=tri, alpha=0.9, color=color, shade=True)  # shade entire mesh
+		trisurf_shade = ax.plot_trisurf(X, Y, Z, triangles=tri, alpha=alpha, color=color, shade=True)  # shade entire mesh
 		trisurfs += [trisurf_shade]
 		if prop:
 			trisurf_prop = ax.plot_trisurf(X, Y, Z, triangles=tri, alpha=0.5, cmap=cmap)  # display properties of faces
