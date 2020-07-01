@@ -1,3 +1,13 @@
+"""Operations used for calculating ARAP
+
+jfmt is a standard Tensor index notation, of i, j, where i = vert idx, and j = neighbouring vert idx
+
+nfmt is a Tensor index method used to drastically reduce the size of the tensors used. Rather than use sparse matrices, the index notation for
+what would usually be i, j in jfmt, is instead transformed to i, n
+where n is the index of j within the list of neighbours J for every i.
+For each mesh, n is fixed in the range 0 < n < N, where N is the maximum size of all J for that mesh
+"""
+
 import numpy as np
 import torch
 from pytorch3d.structures import Meshes
@@ -9,6 +19,13 @@ sys.path.append("../")
 from .arap_utils import least_sq_with_known_values, Timer
 from tqdm import tqdm
 
+### Attempt to import svd batch method. If not provided, use default method
+### Sourced from https://github.com/KinglittleQ/torch-batch-svd/blob/master/torch_batch_svd/include/utils.h
+try:
+	from torch_batch_svd import svd as batch_svd
+except ImportError:
+	print("torch_batch_svd not installed. Using torch.svd instead")
+	batch_svd = torch.svd
 
 def ARAP_from_meshes(meshes):
 	"""Produce ARAPMeshes object from Meshes object
@@ -54,7 +71,7 @@ class ARAPMeshes(Meshes):
 	Allows for movement of handle vertices from original mesh position, and identifies new positions of all other
 	non-static verts using the As Rigid As Possible algorithm (As-Rigid-As-Possible Surface Modeling, O. Sorkine & M. Alexa)"""
 
-	def __init__(self, verts=None, faces=None, textures=None):
+	def __init__(self, verts=None, faces=None, textures=None, device="cuda"):
 		"""
 		lists of verts, faces and textures for methods. For details, see Meshes documentation
 
@@ -70,11 +87,15 @@ class ARAPMeshes(Meshes):
 
 		self.precomputed_params = {} # dictionary to store precomputed parameters
 
+		# Precompute cotangent weights in nfmt. nfmt is defined at the top of this script
+		w_full = get_cot_weights_full(self, device=device)
+		w_nfmts = produce_cot_weights_nfmt(self, self.one_ring_neighbours, device=device)
+		self.w_nfmts = w_nfmts
 
 	def get_one_ring_neighbours(self):
 		"""Return a dict, where key i gives a list of all neighbouring vertices (connected by exactly one edge)"""
 
-		all_faces = self.faces_padded().detach().numpy()
+		all_faces = self.faces_padded().cpu().detach().numpy()
 		orn = []
 
 		for m, faces in enumerate(all_faces): # for each mesh
@@ -316,7 +337,7 @@ def get_cot_weights(meshes) -> torch.Tensor:
 
 	return w_padded
 
-def get_cot_weights_full(meshes, verts=None) -> torch.Tensor:
+def get_cot_weights_full(meshes, verts=None, device="cuda", sparse=False) -> torch.Tensor:
 	"""Given a meshes object, return a padded tensor w, of shape (N_meshes, max_verts, max_verts),
 	where, for a given mesh, the tensor w:
 	w_ij = 0.5 * ( cot(alpha_ij) + cot(beta_ij) )
@@ -335,7 +356,11 @@ def get_cot_weights_full(meshes, verts=None) -> torch.Tensor:
 	else:
 		all_verts = verts
 
-	w = torch.zeros((n_meshes, max_verts, max_verts))
+	if sparse:
+		W = []
+	
+	else:
+		W = torch.zeros((n_meshes, max_verts, max_verts)).to(device)
 
 	for n in range(n_meshes):
 		V, F = all_n_verts[n], all_n_faces[n]
@@ -365,30 +390,96 @@ def get_cot_weights_full(meshes, verts=None) -> torch.Tensor:
 		cot = torch.stack([cota, cotb, cotc], dim=1)
 		cot /= 4.0
 
-		i = faces[:, [0, 1, 2]].view(-1)  # flattened tensor of by face, v0, v1, v2
-		j = faces[:, [1, 2, 0]].view(-1)  # flattened tensor of by face, v1, v2, v0
+		if sparse:
+			ii = faces[:, [1, 2, 0]]
+			jj = faces[:, [2, 0, 1]]
+			idx = torch.stack([ii, jj], dim=0).view(2, F * 3)
+			w = torch.sparse.FloatTensor(idx, cot.view(-1), (V, V))
+			w += w.t()
+			W.append(w)
 
-		# flatten cot, such that the following line sets
-		# w_ij = 0.5 * cot a_ij
-		w[n][i, j] = 0.5 * cot.view(-1)
-		# to include b_ij, simply add the transpose to itself
-		w[n] += w[n].T
+		else:
+			i = faces[:, [0, 1, 2]].view(-1)  # flattened tensor of by face, v0, v1, v2
+			j = faces[:, [1, 2, 0]].view(-1)  # flattened tensor of by face, v1, v2, v0
 
-	return w
+			# flatten cot, such that the following line sets
+			# w_ij = 0.5 * cot a_ij
+			W[n][i, j] = 0.5 * cot.view(-1)
+			# to include b_ij, simply add the transpose to itself
+			W[n] += W[n].T
+
+	return W
 
 
-def produce_edge_matrix(verts: torch.Tensor) -> torch.Tensor:
-	"""Given a tensor of verts postion, p (V x 3), produce a tensor E, where
-	E_ij = p_i - p_j"""
+def produce_cot_weights_nfmt(meshes, orn_list, verts=None, device="cuda", mesh_idx = 0):
+	"""Convert a tensor w_ij of cotangent weights, to a format w_in, where
+	w_in = 0.5 * (a_ij + b_ij), where j = J[n].
+	
+	:returns w_nfmt: list size n_meshes, each with tensor of shape (verts, max_neighbours_in_mesh)
+	"""
 
-	V, _ = verts.shape
-	pi = verts.unsqueeze(0).repeat(V, 1, 1) # tensor where each row is the same
-	pj = pi.permute(1, 0, 2) # tensor where each column is the same
+	w_nfmt = []
 
-	E = pi - pj
+	w_full = get_cot_weights_full(meshes, device=device)
+
+	for mesh_idx in range(len(meshes)):
+		orn = orn_list[mesh_idx]
+		max_neighbours = max(map(len, orn.values())) # largest number of neighbours
+		V = meshes.num_verts_per_mesh()[mesh_idx]
+		W = w_full[mesh_idx]
+
+		Wn = torch.zeros((V, max_neighbours)).to(device)
+		ii, jj, nn = produce_idxs(V, orn, device)
+
+		Wn[ii, nn] = W[ii, jj]
+		w_nfmt.append(Wn)
+
+	return w_nfmt
+
+def produce_edge_matrix_nfmt(verts: torch.Tensor, edge_shape, ii, jj, nn, device="cuda") -> torch.Tensor:
+	"""Given a tensor of verts postion, p (V x 3), produce a tensor E, where, for neighbour list J,
+	E_in = p_i - p_(J[n])"""
+
+	E = torch.zeros(edge_shape).to(device)
+	E[ii, nn] = verts[ii] - verts[jj]
+
 	return E
 
-def compute_energy(meshes: ARAPMeshes, verts: torch.Tensor, verts_deformed: torch.Tensor, mesh_idx = 0):
+def produce_idxs(V, orn, device = "cuda"):
+	"""For V verts and dict of one ring neighbours, return indices of every i, j and n
+	where i = vert idx, j = neighbouring vert idx, n = number neighbour"""
+	ii = []
+	jj = []
+	nn = []
+	for i in range(V):
+		J = orn[i]
+		for n, j in enumerate(J):
+			ii.append(i)
+			jj.append(j)
+			nn.append(n)
+
+	ii = torch.LongTensor(ii).to(device)
+	jj = torch.LongTensor(jj).to(device)
+	nn = torch.LongTensor(nn).to(device)
+	
+	return ii, jj, nn
+
+def produce_edge_matrix(verts: torch.Tensor, orn: dict, device="cuda") -> torch.Tensor:
+	"""Given a tensor of verts postion, p (V x 3), produce a sparse tensor E, where
+	E_ij = p_i - p_j if j and i are neighbours
+	E_ij = 0 otherwise"""
+	V, _ = verts.shape
+
+	ii, jj, _ = produce_idxs(V, orn, device)
+	idx = torch.stack([ii, jj], dim=0).to(device)
+
+	values = verts[ii] - verts[jj]
+	E = torch.sparse.FloatTensor(idx, values, (V, V, 3))#.to(device)
+
+	return E
+
+timer = Timer()
+def compute_energy(meshes: ARAPMeshes, verts: torch.Tensor, verts_deformed: torch.Tensor, mesh_idx = 0, device="cuda"):
 	"""Compute the energy of a deformation for a deformation, according to
 
 	sum_i w_i * sum_j w_ij || (p'_i - p'_j) - R_i(p_i - p_j) ||^2
@@ -412,52 +503,47 @@ def compute_energy(meshes: ARAPMeshes, verts: torch.Tensor, verts_deformed: torc
 
 	"""
 
-	N = meshes.num_verts_per_mesh()[mesh_idx]
-	w = get_cot_weights_full(meshes, verts)[mesh_idx]
+	V = meshes.num_verts_per_mesh()[mesh_idx]
+
+	orn = meshes.one_ring_neighbours[mesh_idx]
+	max_neighbours = max(map(len, orn.values())) # largest number of neighbours
+
+	ii, jj, nn = produce_idxs(V, orn, device) # flattened tensors for indices
+	
+	w = meshes.w_nfmts[mesh_idx]	# cotangent weight matrix, in nfmt index format
 
 	p = verts[mesh_idx]  # initial mesh
 	p_prime = verts_deformed[mesh_idx] # displaced verts
 
-	P = produce_edge_matrix(p)
-	P_prime = produce_edge_matrix(p_prime)
+	edge_shape = (V, max_neighbours, 3)
+	P = produce_edge_matrix_nfmt(p, edge_shape, ii, jj, nn, device=device)
+	P_prime = produce_edge_matrix_nfmt(p_prime, edge_shape, ii, jj, nn, device=device)
 
-	R = torch.zeros((N, 3, 3))  # Local rotations R
-	for i in range(N):
-		J = meshes.one_ring_neighbours[0][i]
 
-		P_i = (p[i] - p[J]).T
-		D_i = torch.diag(w[i,J])
-		P_prime_i = (p_prime[i] - p_prime[J]).T
+	### Calculate covariance matrix in bulk
+	D = torch.diag_embed(w, dim1=1, dim2=2)
+	S = torch.bmm(P.permute(0,2,1), torch.bmm(D, P_prime))
 
-		## in the case of no deflection, set R = I. This is to avoid numerical errors
-		if torch.equal(P_i, P_prime_i):
-			R[i] = torch.eye(3)
-			continue
+	## in the case of no deflection, set S = 0, such that R = I. This is to avoid numerical errors
+	unchanged_verts = torch.unique(torch.where((P == P_prime).all(dim=1))[0]) # any verts which are undeformed
+	S[unchanged_verts] = 0
 
-		# Get rigid rotation that maximises Tr(R * (PDP'))
-		Si = torch.mm(P_i, torch.mm(D_i, P_prime_i.T))
-		Ui, sig, Vi = torch.svd(Si)
+	U, sig, W = batch_svd(S)
+	R = torch.bmm(W, U.permute(0,2,1))	# compute rotations
 
-		Ri = torch.mm(Vi, Ui.T)
+	# Need to flip the column of U corresponding to smallest singular value
+	# for any det(Ri) <= 0
+	entries_to_flip = torch.nonzero(torch.det(R) <= 0, as_tuple=False).flatten() # idxs where det(R) <= 0
+	if len(entries_to_flip) > 0:
+		Umod = U.clone()
+		cols_to_flip = torch.argmin(sig[entries_to_flip], dim=1) # Get minimum singular value for each entry
+		Umod[entries_to_flip, :, cols_to_flip] *= -1 # flip cols
+		R[entries_to_flip] = torch.bmm(W[entries_to_flip], Umod[entries_to_flip].permute(0,2,1))
 
-		if torch.det(Ri) <= 0:
-			# Flip column of Ui corresponding to smallest singular value (ensures det(Ri)>0)
-			col_flip = (sig == sig.min()).nonzero()[0, 0]
-			Ui_mod = Ui.clone()
-			Ui_mod[:, col_flip] *= -1
-			R[i] = torch.mm(Vi, Ui_mod.T)
-
-		else:
-			R[i] = Ri
-
-	def sparse_dense_mul(s, d):
-		i = s._indices()
-		v = s._values()
-		dv = d[i[0, :], i[1, :]]  # get values from relevant entries of dense matrix
-		return torch.sparse.FloatTensor(i, v * dv, s.size())
-
-	stretch = P_prime - torch.bmm(R, P.permute(0, 2, 1)).permute(0, 2, 1)
-	stretch_norm = torch.norm(stretch, dim=2)**2  # norm over (x,y,z) space
-	energy = (w * stretch_norm).sum() # element wise multiplication
+	# Compute energy
+	rot_rigid = torch.bmm(R, P.permute(0, 2, 1)).permute(0, 2, 1)
+	stretch_vec = P_prime - rot_rigid # stretch vector
+	stretch_norm = (torch.norm(stretch_vec, dim=2)**2)  # norm over (x,y,z) space
+	energy = (w * stretch_norm).sum()
 
 	return energy

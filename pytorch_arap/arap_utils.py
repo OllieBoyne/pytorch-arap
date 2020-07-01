@@ -156,8 +156,8 @@ def plot_meshes(ax, verts, faces, static_verts=[], handle_verts=[], change_lims=
 	trisurfs = []
 
 	for n in range(n_meshes):
-		points = verts[n].detach().numpy()
-		faces = faces[n].detach().numpy()
+		points = verts[n].cpu().detach().numpy()
+		faces = faces[n].cpu().detach().numpy()
 
 		X, Y, Z = np.rollaxis(points, -1)
 		tri = Triangulation(X, Y, triangles=faces).triangles
@@ -203,12 +203,23 @@ def save_animation(fig, func, n_frames, fmt="gif", fps=15, title="output", callb
 	else:
 		anim.save(os.path.join(out_dir, f"{title}.{fmt}"), writer=W) # no tqdm
 
-def profile_backwards(loss):
+def profile_backwards(loss, device="cuda"):
 	"""Profiles and prints report of loss.backwards"""
-	with torch.autograd.profiler.profile() as prof:
+	with torch.autograd.profiler.profile(use_cuda=True) as prof:
 		loss.backward()
+			
+	if "cuda" in device: sort_by = "cuda_time_total"
+	else: sort_by="self_cpu_time_total"
 
-	print(prof.key_averages().table(sort_by="self_cpu_time_total"))
+	print(prof.key_averages().table(sort_by=sort_by))
+
+
+def time_function(func, *args, **kwargs):
+
+	t0 = tfunc()
+	out = func(*args, **kwargs)
+	print(f"{func.__name__}, t = {(tfunc()-t0)*1000:.3f}ms.")
+	return out
 
 if __name__ == "__main__":
 
