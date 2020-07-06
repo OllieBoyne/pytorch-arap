@@ -27,7 +27,7 @@ except ImportError:
 	print("torch_batch_svd not installed. Using torch.svd instead")
 	batch_svd = torch.svd
 
-def ARAP_from_meshes(meshes):
+def ARAP_from_meshes(meshes, device="cuda"):
 	"""Produce ARAPMeshes object from Meshes object
 	:type meshes: Meshes
 	"""
@@ -35,7 +35,7 @@ def ARAP_from_meshes(meshes):
 	faces = meshes.faces_list()
 	textures = meshes.textures
 
-	return ARAPMeshes(verts=verts, faces=faces, textures=textures)
+	return ARAPMeshes(verts=verts, faces=faces, textures=textures, device=device)
 
 def add_one_ring_neighbours(meshes, arr, mesh_idx=0):
 	"""Given an array of mesh vertex indices, returns an array of all arr, plus any neighbouring verts
@@ -56,13 +56,13 @@ def add_n_ring_neighbours(meshes, arr, mesh_idx=0, n=2):
 
 	return arr
 
-def cholesky_invert(tensor):
+def cholesky_invert(A):
 
-	L_L = torch.cholesky(tensor)
-	L_L_inv = torch.inverse(L_L)
-	L_ch_inv = torch.mm(L_L_inv.T, L_L_inv)
+	L = torch.cholesky(A)
+	L_inv = torch.inverse(L)
+	A_inv = torch.mm(L_inv.T, L_inv)
 
-	return L_ch_inv
+	return A_inv
 
 class ARAPMeshes(Meshes):
 	"""
@@ -147,12 +147,8 @@ class ARAPMeshes(Meshes):
 		for n in range(len(self)):
 			w = w_padded[n]
 			# diagonal L_ii = sum(w_i). non-diagonal L_ij = -w_ij
-
-			L_padded[n] = torch.diag(torch.sum(w, dim=1)) - w
-			# ii = np.arange(N[n])
-			# L_padded[ii] = - w_
-
-			L_inv_padded[n] = torch.cholesky(L_padded[n])
+			L_padded[n] = torch.diag(torch.sum(w, dim=0)) - w
+			L_inv_padded[n] = torch.inverse(torch.cholesky(L_padded[n]))
 
 		self.precomputed_params["L_padded"] = L_padded
 		self.precomputed_params["w_padded"] = w_padded
@@ -204,13 +200,12 @@ class ARAPMeshes(Meshes):
 		p0 = working guess
 """
 
-		N = self.num_verts_per_mesh()[mesh_idx]
+		V = self.num_verts_per_mesh()[mesh_idx]
 		p = self.verts_padded()[mesh_idx]  # initial mesh
 
 		if "w_padded" not in self.precomputed_params:
 			self.precompute_laplacian()
 
-		w = self.precomputed_params["w_padded"][mesh_idx]
 		L = self.precomputed_params["L_padded"][mesh_idx]
 
 		known_handles = {i:pos for i,pos in zip(handle_verts, handle_verts_pos)}
@@ -220,18 +215,14 @@ class ARAPMeshes(Meshes):
 		# Initial guess using Naive Laplacian editing: least square minimisation of |Lp0 - Lp|, subject to known
 		# constraints on the values of p, from static and handles
 		p_prime = least_sq_with_known_values(L, torch.mm(L, p), known=known)
-		# TODO: address poor conditioning leading to some large deviations in value
 
 		if n_its == 0:  # if only want initial guess, end here
 			return p_prime
 
 		## modify L, L_inv and b_fixed to incorporate boundary conditions
-		known_verts = np.array([n for n in range(N) if n in known])
-		unknown_verts = [n for n in range(N) if n not in known] # indices of all unknown verts
-		n_unknown = len(unknown_verts)
-		n_known = len(known)
+		unknown_verts = [n for n in range(V) if n not in known] # indices of all unknown verts
 
-		b_fixed = torch.zeros((N, 3))  # factor to be subtracted from b, due to constraints
+		b_fixed = torch.zeros((V, 3))  # factor to be subtracted from b, due to constraints
 		for k, pos in known.items():
 			b_fixed += torch.einsum("i,j->ij", L[:, k], pos) # [unknown]
 
@@ -239,45 +230,58 @@ class ARAPMeshes(Meshes):
 		if "L_reduced_inv" not in self.precomputed_params:
 			self.precompute_reduced_laplacian(static_verts, handle_verts)
 
-		#  Precompute PD if not already done
-		if "PD" not in self.precomputed_params:
-			self.precompute_PD()
-
 		L_reduced_inv = self.precomputed_params["L_reduced_inv"]
-		PD = self.precomputed_params["PD"]
+
+		orn = self.one_ring_neighbours[mesh_idx]
+		max_neighbours = max(map(len, orn.values()))  # largest number of neighbours
+
+		ii, jj, nn = produce_idxs(V, orn, self.device)  # flattened tensors for indices
+		w = self.w_nfmts[mesh_idx]  # cotangent weight matrix, in nfmt index format
+
+		edge_shape = (V, max_neighbours, 3)
+		P = produce_edge_matrix_nfmt(p, edge_shape, ii, jj, nn, device=self.device)
 
 		# Iterate through method
 		if report: progress = tqdm(total=n_its)
 
 		for it in range(n_its):
-			R = torch.zeros((N, 3, 3))  # Local rotations R
-			for i in range(N):
-				j = self.one_ring_neighbours[mesh_idx][i]
 
-				P_prime_i_T = (p_prime[i] - p_prime[j])
+			P_prime = produce_edge_matrix_nfmt(p_prime, edge_shape, ii, jj, nn, device=self.device)
 
-				Si = torch.mm(PD[i, :, :len(j)], P_prime_i_T)
-				Ui, sig, Vi = torch.svd(Si)
-				Ri = torch.mm(Vi, Ui.T)
+			### Calculate covariance matrix in bulk
+			D = torch.diag_embed(w, dim1=1, dim2=2)
+			S = torch.bmm(P.permute(0, 2, 1), torch.bmm(D, P_prime))
 
-				if torch.det(Ri) <= 0:
-					# Flip column of Ui corresponding to smallest singular value (ensures det(Ri)>0)
-					col_flip = (sig == sig.min()).nonzero()[0, 0]
-					Ui_mod = Ui.clone()
-					Ui_mod[:, col_flip] *= -1
-					R[i] = torch.mm(Vi, Ui.T)
+			## in the case of no deflection, set S = 0, such that R = I. This is to avoid numerical errors
+			unchanged_verts = torch.unique(torch.where((P == P_prime).all(dim=1))[0])  # any verts which are undeformed
+			S[unchanged_verts] = 0
 
-				else:
-					R[i] = Ri
+			U, sig, W = batch_svd(S)
+			R = torch.bmm(W, U.permute(0, 2, 1))  # compute rotations
 
-			b = torch.zeros((N, 3)) # RHS of minimum energy equation, with known p's removed
-			for i in unknown_verts:
-				j = self.one_ring_neighbours[mesh_idx][i]
-				deforms = torch.bmm(R[i] + R[j], (p[i] - p[j]).unsqueeze(-1)).squeeze(-1)  # ( len(j) x 3)
-				b[i] = 0.5 * torch.mv(deforms.T, w[i,j])  # weighted product of deforms (3)
+			# Need to flip the column of U corresponding to smallest singular value
+			# for any det(Ri) <= 0
+			entries_to_flip = torch.nonzero(torch.det(R) <= 0, as_tuple=False).flatten()  # idxs where det(R) <= 0
+			if len(entries_to_flip) > 0:
+				Umod = U.clone()
+				cols_to_flip = torch.argmin(sig[entries_to_flip], dim=1)  # Get minimum singular value for each entry
+				Umod[entries_to_flip, :, cols_to_flip] *= -1  # flip cols
+				R[entries_to_flip] = torch.bmm(W[entries_to_flip], Umod[entries_to_flip].permute(0, 2, 1))
 
-			# self.timer.add("b")
+			### RHS of minimum energy equation
+			Rsum_shape = (V, max_neighbours, 3, 3)
+			Rsum = torch.zeros(Rsum_shape).to(self.device) # Ri + Rj, as in eq (8)
+			Rsum[ii, nn] = R[ii] + R[jj]
+
+			### Rsum has shape (V, max_neighbours, 3, 3). P has shape (V, max_neighbours, 3)
+			### To batch multiply, collapse first 2 dims into a single batch dim
+			Rsum_batch, P_batch = Rsum.view(-1, 3, 3), P.view(-1,3).unsqueeze(-1)
+
+			# RHS of minimum energy equation
+			b = 0.5 * (w[..., None] * torch.bmm(Rsum_batch, P_batch).squeeze(-1).reshape(V, max_neighbours, 3)).sum(dim=1)
+
 			b -= b_fixed  # subtract component of LHS not included - constraints
+
 			p_prime_unknown = torch.mm(L_reduced_inv, b[unknown_verts])  # predicted p's for only unknown values
 
 			p_prime = torch.zeros_like(p_prime)  # generate next iteration of fit, from p0_unknown and constraints
@@ -289,7 +293,7 @@ class ARAPMeshes(Meshes):
 
 			# track energy
 			if track_energy:
-				energy = compute_energy(self,[p], [p_prime])
+				energy = compute_energy(self,[p], [p_prime], device=self.device)
 				print(f"It = {it}, Energy = {energy:.2f}")
 			# update tqdm
 			if report:
@@ -319,23 +323,6 @@ class ARAPMeshes(Meshes):
 
 		self.offset_verts_((verts_rotated - verts_0))
 
-
-def get_cot_weights(meshes) -> torch.Tensor:
-	"""Given a meshes object, return packed tensor of cotangent weights, where
-	w_ij = 0.5 * (alpha_ij + beta_ij)"""
-
-	w = laplacian_cot(meshes)[0]
-	w = w.to_dense() / 2
-
-	## split to padded
-	n = meshes.num_verts_per_mesh()
-	w_padded = torch.zeros((len(meshes), n.max(), n.max()))
-	cum_n = np.concatenate([[0], np.cumsum(n.tolist())])  # list of n_verts before and after every mesh is included
-
-	for i, (start, end) in enumerate(zip(cum_n[:-1], cum_n[1:])):
-		w_padded[i] = w[start:end, start:end]
-
-	return w_padded
 
 def get_cot_weights_full(meshes, verts=None, device="cuda", sparse=False) -> torch.Tensor:
 	"""Given a meshes object, return a padded tensor w, of shape (N_meshes, max_verts, max_verts),
@@ -448,6 +435,7 @@ def produce_edge_matrix_nfmt(verts: torch.Tensor, edge_shape, ii, jj, nn, device
 def produce_idxs(V, orn, device = "cuda"):
 	"""For V verts and dict of one ring neighbours, return indices of every i, j and n
 	where i = vert idx, j = neighbouring vert idx, n = number neighbour"""
+
 	ii = []
 	jj = []
 	nn = []
@@ -478,7 +466,6 @@ def produce_edge_matrix(verts: torch.Tensor, orn: dict, device="cuda") -> torch.
 
 	return E
 
-timer = Timer()
 def compute_energy(meshes: ARAPMeshes, verts: torch.Tensor, verts_deformed: torch.Tensor, mesh_idx = 0, device="cuda"):
 	"""Compute the energy of a deformation for a deformation, according to
 

@@ -11,13 +11,19 @@ from matplotlib import pyplot as plt
 from pytorch_arap.arap_utils import save_animation, plot_meshes, profile_backwards
 from tqdm import tqdm
 
+if torch.cuda.is_available():
+	device = "cuda"
+else:
+	device = "cpu"
+
 class Model(torch.nn.Module):
 	"""Verts to be optimised"""
 
-	def __init__(self, meshes, verts):
+	def __init__(self, meshes, verts, device="cuda"):
 
 		super().__init__()
 
+		self.device = device
 		self.verts_template = verts
 		self.meshes = meshes
 
@@ -33,7 +39,7 @@ class Model(torch.nn.Module):
 	def forward(self):
 
 		loss_target = torch.nn.functional.mse_loss(self.verts[0,self.handle_verts], self.handle_pos)
-		loss_arap = arap_loss(self.meshes, self.verts_template, self.verts)
+		loss_arap = arap_loss(self.meshes, self.verts_template, self.verts, device=self.device)
 
 		loss = loss_target + 0.001 * loss_arap
 
@@ -45,7 +51,7 @@ def deform_smal():
 
 	targ = os.path.join("sample_meshes", "smal.obj")
 	meshes = load_objs_as_meshes([targ], load_textures=False)
-	meshes = ARAP_from_meshes(meshes) # convert to ARAP obejct
+	meshes = ARAP_from_meshes(meshes, device=device) # convert to ARAP obejct
 	N = meshes.num_verts_per_mesh()[0]
 
 	meshes.rotate(mesh_idx=0, rot_x=np.pi/2)
@@ -75,14 +81,14 @@ def deform_smal():
 
 	verts_template = meshes.verts_padded()
 
-	model = Model(meshes, verts_template)
+	model = Model(meshes, verts_template, device=device)
 	model.set_target(handle_verts, handle_pos_shifted)
 
-	model()
+	# model()
 
-	optimiser = torch.optim.Adam(model.parameters(), lr = 1e-3)#5e-3)
+	optimiser = torch.optim.Adam(model.parameters(), lr = 5e-3)
 
-	n_frames = 100
+	n_frames = 50
 	progress = tqdm(total=n_frames)
 
 	def anim(i):
@@ -91,8 +97,7 @@ def deform_smal():
 		optimiser.zero_grad()
 		loss = model()
 
-
-		profile_backwards(loss)
+		loss.backward()
 		optimiser.step()
 
 		trisurfs[:] = plot_meshes(ax, model.verts, faces, handle_verts=handle_verts, static_verts=static_verts, prop=prop,
@@ -101,12 +106,12 @@ def deform_smal():
 		progress.n = i+1
 		progress.last_print_n = i+1
 
-		progress.set_description(f"Vert_disp = {((model.verts_template-model.verts)**2).sum():.4f}")
+		progress.set_description(f"Loss = {loss:.4f}")
 
 	# anim(1)
-	# ax.axis("off")
 	# plt.show()
 
+	ax.axis("off")
 	save_animation(fig, anim, n_frames, fmt="gif", fps=15, title="smal_arap_lossfit", callback=False)
 
 if __name__ == "__main__":

@@ -10,6 +10,11 @@ import torch
 
 from pytorch_arap.arap_utils import save_animation, plot_meshes
 
+if torch.cuda.is_available():
+	device = "cuda"
+else:
+	device = "cpu"
+
 def deform_cuboid():
 	targ = os.path.join("sample_meshes", "cuboid_hp.obj")
 	meshes = load_objs_as_meshes([targ], load_textures=False)
@@ -111,7 +116,7 @@ def deform_cactus():
 
 	targ = os.path.join("sample_meshes", "cactus.obj")
 	meshes = load_objs_as_meshes([targ], load_textures=False)
-	meshes = ARAP_from_meshes(meshes) # convert to ARAP obejct
+	meshes = ARAP_from_meshes(meshes, device=device) # convert to ARAP obejct
 	N = meshes.num_verts_per_mesh()[0]
 
 	# handle as topmost vert
@@ -136,7 +141,7 @@ def deform_cactus():
 	disp_frac = 0.4 # fraction of full disp_vec to move in animation
 	step = disp_frac * 4/n_frames # moves
 
-	nits = 10
+	nits = 2
 	def anim(i):
 		[x.remove() for x in trisurfs] # remove previous frame's mesh
 
@@ -148,10 +153,9 @@ def deform_cactus():
 		handle_pos_shifted[:] += direction * step * disp_vec
 
 		## deform, replot
+		# print("----")
 		verts = meshes.solve(static_verts=static_verts, handle_verts=handle_verts, handle_verts_pos=handle_pos_shifted, n_its = nits,
-					 track_energy=True) ## run ARAP
-		print("----")
-
+							 track_energy=False) ## run ARAP
 
 		verts = [verts]
 
@@ -291,8 +295,8 @@ if __name__ == "__main__":
 
 	# deform_cuboid()
 	# deform_sphere()
-	deform_smal()
-	# deform_cactus()
+	# deform_smal()
+	deform_cactus()
 
 
 
