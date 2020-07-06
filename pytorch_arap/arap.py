@@ -323,6 +323,46 @@ class ARAPMeshes(Meshes):
 
 		self.offset_verts_((verts_rotated - verts_0))
 
+	def __getitem__(self, index):
+		"""
+		Args:
+			index: Specifying the index of the mesh to retrieve.
+				Can be an int, slice, list of ints or a boolean tensor.
+
+		Returns:
+			Meshes object with selected meshes. The mesh tensors are not cloned.
+
+		Modified version of PyTorch3D.structures.meshes __getitem__ to account for device
+		"""
+		if isinstance(index, (int, slice)):
+			verts = self.verts_list()[index]
+			faces = self.faces_list()[index]
+		elif isinstance(index, list):
+			verts = [self.verts_list()[i] for i in index]
+			faces = [self.faces_list()[i] for i in index]
+		elif isinstance(index, torch.Tensor):
+			if index.dim() != 1 or index.dtype.is_floating_point:
+				raise IndexError(index)
+			# NOTE consider converting index to cpu for efficiency
+			if index.dtype == torch.bool:
+				# advanced indexing on a single dimension
+				index = index.nonzero()
+				index = index.squeeze(1) if index.numel() > 0 else index
+				index = index.tolist()
+			verts = [self.verts_list()[i] for i in index]
+			faces = [self.faces_list()[i] for i in index]
+		else:
+			raise IndexError(index)
+
+		textures = None if self.textures is None else self.textures[index]
+
+		if torch.is_tensor(verts) and torch.is_tensor(faces):
+			return self.__class__(verts=[verts], faces=[faces], textures=textures, device=self.device)
+		elif isinstance(verts, list) and isinstance(faces, list):
+			return self.__class__(verts=verts, faces=faces, textures=textures, device=self.device)
+		else:
+			raise ValueError("(verts, faces) not defined correctly")
+
 
 def get_cot_weights_full(meshes, verts=None, device="cuda", sparse=False) -> torch.Tensor:
 	"""Given a meshes object, return a padded tensor w, of shape (N_meshes, max_verts, max_verts),
