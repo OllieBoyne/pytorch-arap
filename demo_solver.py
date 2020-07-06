@@ -153,7 +153,6 @@ def deform_cactus():
 		handle_pos_shifted[:] += direction * step * disp_vec
 
 		## deform, replot
-		# print("----")
 		verts = meshes.solve(static_verts=static_verts, handle_verts=handle_verts, handle_verts_pos=handle_pos_shifted, n_its = nits,
 							 track_energy=False) ## run ARAP
 

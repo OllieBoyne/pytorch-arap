@@ -7,7 +7,7 @@ Builds on PyTorch and PyTorch3D.
 ## Installation
 
 1. Clone into target repository
-2. [Optional] Install torch_batch_svd, from https://github.com/KinglittleQ/torch-batch-svd for improved SVD calculations. If this is not installed, torch.svd will be used.
+2. **Optional**: Install torch_batch_svd, from https://github.com/KinglittleQ/torch-batch-svd for improved SVD calculations. If this is not installed, torch.svd will be used.
 
 ## Usage
 For examples on how to use this module, see `demo_loss.py` for calculating the ARAP surface energy for as a loss function,

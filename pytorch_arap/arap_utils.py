@@ -4,11 +4,14 @@ from matplotlib.animation import FuncAnimation, writers
 from tqdm import tqdm
 from matplotlib.tri import Triangulation
 from matplotlib.colors import ListedColormap
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 import os
+
 
 def trymkdir(loc):
 	if not os.path.isdir(loc):
 		os.mkdir(loc)
+
 
 def is_positive_definite(tensor):
 	"""Bool check if 2D matrix is positive definite
@@ -16,12 +19,11 @@ def is_positive_definite(tensor):
 	:type tensor: torch.Tensor"""
 
 	eig, _ = torch.eig(tensor)
-
-	eig = eig[:, 0] # only real part
-
+	eig = eig[:, 0]  # only real part
 	return torch.all(eig > 0)
 
-def least_sq_with_known_values(A, b, known = None):
+
+def least_sq_with_known_values(A, b, known=None):
 	"""Solves the least squares problem minx ||Ax - b||2, where some values of x are known.
 	Works by moving all known variables from A to b.
 
@@ -49,7 +51,7 @@ def least_sq_with_known_values(A, b, known = None):
 
 	# Remove from A
 	unknown = [n for n in range(N) if n not in known]
-	A = A[:, unknown] # only continue with cols for unknowns
+	A = A[:, unknown]  # only continue with cols for unknowns
 
 	x, QR = torch.lstsq(b, A)
 
@@ -66,7 +68,10 @@ def least_sq_with_known_values(A, b, known = None):
 	## X has shape max(m, n) x k. Only want first n rows
 	return x_out
 
+
 from time import perf_counter as tfunc
+
+
 class Timer:
 	def __init__(self):
 		self.t0 = tfunc()
@@ -98,9 +103,11 @@ class Timer:
 				else:
 					out_time = np.sum(t) / nits
 
-			out[k] = {"out_time":out_time, "mean":np.mean(t), "call_count": len(t)}
+			out[k] = {"out_time": out_time, "mean": np.mean(t), "call_count": len(t)}
 
-		return "\n".join([f"{k} = {t['out_time']*1000:.1f}ms [{t['call_count']} calls, {t['mean']*1e6:.1f}us/call]" for k, t in out.items()])
+		return "\n".join(
+			[f"{k} = {t['out_time'] * 1000:.1f}ms [{t['call_count']} calls, {t['mean'] * 1e6:.1f}us/call]" for k, t in
+			 out.items()])
 
 
 def simplify_obj_file(src):
@@ -120,18 +127,14 @@ def simplify_obj_file(src):
 				out_line = "f " + " ".join(faceverts) + "\n"
 				out += [out_line]
 
-				# faceverts_n = list(map(int, faceverts))
-				# if any(v>=nverts for v in faceverts_n):
-				# 	print(line, "Faces have invalid indices")
-
 	out_src = src.replace(".obj", "_simplify.obj")
 	with open(out_src, "w") as outfile:
 		outfile.writelines(out)
 
+
 ## matplotlib utils
 
 def equal_3d_axes(ax, X, Y, Z, zoom=1.0):
-
 	"""Sets all axes to same lengthscale through trick found here:
 	https://stackoverflow.com/questions/13685386/matplotlib-equal-unit-length-with-equal-aspect-ratio-z-axis-is-not-equal-to"""
 
@@ -145,6 +148,7 @@ def equal_3d_axes(ax, X, Y, Z, zoom=1.0):
 	ax.set_xlim(mid_x - max_range, mid_x + max_range)
 	ax.set_ylim(mid_y - max_range, mid_y + max_range)
 	ax.set_zlim(mid_z - max_range, mid_z + max_range)
+
 
 def plot_meshes(ax, verts, faces, static_verts=[], handle_verts=[], change_lims=False, color="darkcyan",
 				prop=True, zoom=1.5, n_meshes=1, alpha=1.0):
@@ -164,31 +168,31 @@ def plot_meshes(ax, verts, faces, static_verts=[], handle_verts=[], change_lims=
 
 		cmap = ListedColormap([color, "black", "red"], "mesh")  # colourmap used for showing properties on mesh
 
-		trisurf_shade = ax.plot_trisurf(X, Y, Z, triangles=tri, alpha=alpha, color=color, shade=True)  # shade entire mesh
+		trisurf_shade = ax.plot_trisurf(X, Y, Z, triangles=tri, alpha=alpha, color=color,
+										shade=True)  # shade entire mesh
 		trisurfs += [trisurf_shade]
 		if prop:
 			trisurf_prop = ax.plot_trisurf(X, Y, Z, triangles=tri, alpha=0.5, cmap=cmap)  # display properties of faces
 			trisurfs += [trisurf_prop]
 
-		if prop:
 			# Set colours based on handles
-			vert_prop = np.zeros((len(X))) #property of each vert - handle, static or neither
+			vert_prop = np.zeros((len(X)))  # property of each vert - handle, static or neither
 			vert_prop[handle_verts] = 1
 			vert_prop[static_verts] = 0.5
 
-			colors = vert_prop[tri].max(axis=1) # facecolor based on maximum property of connecting verts
+			colors = vert_prop[tri].max(axis=1)  # facecolor based on maximum property of connecting verts
 			trisurf_prop.set_array(colors)
-
 
 	if change_lims: equal_3d_axes(ax, X, Y, Z, zoom=zoom)
 
 	return trisurfs
 
+
 def save_animation(fig, func, n_frames, fmt="gif", fps=15, title="output", callback=True, **kwargs):
 	"""Save matplotlib animation."""
 
 	writer = writers['imagemagick']
-	W = writer(fps = fps, bitrate=1500)
+	W = writer(fps=fps, bitrate=1500)
 
 	anim = FuncAnimation(fig, func, frames=n_frames, **kwargs)
 
@@ -198,30 +202,53 @@ def save_animation(fig, func, n_frames, fmt="gif", fps=15, title="output", callb
 	if callback:
 		with tqdm(total=n_frames) as save_progress:
 			anim.save(os.path.join(out_dir, f"{title}.{fmt}"), writer=W,
-						   progress_callback=lambda x, i: save_progress.update())
+					  progress_callback=lambda x, i: save_progress.update())
 
 	else:
-		anim.save(os.path.join(out_dir, f"{title}.{fmt}"), writer=W) # no tqdm
+		anim.save(os.path.join(out_dir, f"{title}.{fmt}"), writer=W)  # no tqdm
+
+
+def animator(ax):
+	"""Wrapper used for animating meshes.
+	- Clears all current trisurfs
+	- Runs func, which returns new meshes
+	- Plot these meshes.
+
+	func must contain at least verts, faces"""
+
+	def wrapper(func):
+		# aux is wrapper function sent to wrap around existing anim
+		def aux(frame):
+			[child.remove() for child in ax.get_children() if isinstance(child, Poly3DCollection)]
+			kwargs = func(frame)
+			assert "verts" in kwargs, "anim function must return 'verts' object"
+			assert "faces" in kwargs, "anim function must return 'faces' object"
+			plot_meshes(ax, **kwargs)
+
+		return aux
+
+	return wrapper
+
 
 def profile_backwards(loss, device="cuda"):
 	"""Profiles and prints report of loss.backwards"""
 	with torch.autograd.profiler.profile(use_cuda=True) as prof:
 		loss.backward()
-			
-	if "cuda" in device: sort_by = "cuda_time_total"
-	else: sort_by="self_cpu_time_total"
+
+	if "cuda" in device:
+		sort_by = "cuda_time_total"
+	else:
+		sort_by = "self_cpu_time_total"
 
 	print(prof.key_averages().table(sort_by=sort_by))
 
 
 def time_function(func, *args, **kwargs):
-
 	t0 = tfunc()
 	out = func(*args, **kwargs)
-	print(f"{func.__name__}, t = {(tfunc()-t0)*1000:.3f}ms.")
+	print(f"{func.__name__}, t = {(tfunc() - t0) * 1000:.3f}ms.")
 	return out
 
+
 if __name__ == "__main__":
-
 	simplify_obj_file("../sample_meshes/smal.obj")
-

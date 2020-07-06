@@ -8,7 +8,7 @@ import os
 import torch
 from matplotlib import pyplot as plt
 
-from pytorch_arap.arap_utils import save_animation, plot_meshes, profile_backwards
+from pytorch_arap.arap_utils import save_animation, plot_meshes, animator
 from tqdm import tqdm
 
 if torch.cuda.is_available():
@@ -40,10 +40,7 @@ class Model(torch.nn.Module):
 
 		loss_target = torch.nn.functional.mse_loss(self.verts[0,self.handle_verts], self.handle_pos)
 		loss_arap = arap_loss(self.meshes, self.verts_template, self.verts, device=self.device)
-
 		loss = loss_target + 0.001 * loss_arap
-
-		# print(loss_target, loss_arap, ((self.verts_template-self.verts)**2).mean() )
 
 		return loss
 
@@ -84,32 +81,23 @@ def deform_smal():
 	model = Model(meshes, verts_template, device=device)
 	model.set_target(handle_verts, handle_pos_shifted)
 
-	# model()
-
 	optimiser = torch.optim.Adam(model.parameters(), lr = 5e-3)
 
 	n_frames = 50
 	progress = tqdm(total=n_frames)
 
+	@animator(ax)
 	def anim(i):
-		[x.remove() for x in trisurfs] # remove previous frame's mesh
-
 		optimiser.zero_grad()
 		loss = model()
-
 		loss.backward()
 		optimiser.step()
 
-		trisurfs[:] = plot_meshes(ax, model.verts, faces, handle_verts=handle_verts, static_verts=static_verts, prop=prop,
-								  color="gray")
-
-		progress.n = i+1
-		progress.last_print_n = i+1
-
+		progress.n = progress.last_print_n = i+1
 		progress.set_description(f"Loss = {loss:.4f}")
 
-	# anim(1)
-	# plt.show()
+		return dict(verts = model.verts, faces=faces, handle_verts=handle_verts, static_verts=static_verts,
+					prop=prop, color="gray")
 
 	ax.axis("off")
 	save_animation(fig, anim, n_frames, fmt="gif", fps=15, title="smal_arap_lossfit", callback=False)
