@@ -56,7 +56,7 @@ def least_sq_with_known_values(A, b, known=None):
 	x, QR = torch.lstsq(b, A)
 
 	# all unknown values have now been found. Now create the output tensor, of known and unknown values in correct positions
-	x_out = torch.zeros((N, K))
+	x_out = torch.zeros((N, K)).to(A.device)
 	if known is not None:
 		# Assign initially known values to x_out
 		for index, val in known.items():

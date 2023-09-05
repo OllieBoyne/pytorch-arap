@@ -11,7 +11,7 @@ For each mesh, n is fixed in the range 0 < n < N, where N is the maximum size of
 import numpy as np
 import torch
 from pytorch3d.structures import Meshes
-from pytorch3d.loss.mesh_laplacian_smoothing import laplacian_cot
+from pytorch3d.loss.mesh_laplacian_smoothing import cot_laplacian
 from collections import defaultdict
 
 import sys
@@ -97,6 +97,9 @@ class ARAPMeshes(Meshes):
 		w_nfmts = produce_cot_weights_nfmt(self, self.one_ring_neighbours, device=device)
 		self.w_nfmts = w_nfmts
 
+		self.device = device
+		self.to(device)
+
 	def get_one_ring_neighbours(self):
 		"""Return a dict, where key i gives a list of all neighbouring vertices (connected by exactly one edge)"""
 
@@ -122,7 +125,7 @@ class ARAPMeshes(Meshes):
 		:return cot_weights: Tensor of cotangent weights, shape (N_mesh, max(n_verts_per_mesh), max(n_verts_per_mesh))
 		:type cot_weights: Tensor"""
 
-		w_packed, _ = laplacian_cot(self)  # per-edge weightings used
+		w_packed, _ = cot_laplacian(self.verts_padded()[0], self.faces_padded()[0])  # per-edge weightings used
 		w_packed = w_packed.to_dense()
 
 		# w_packed[w_packed<0] = 0
@@ -204,13 +207,14 @@ class ARAPMeshes(Meshes):
 		p0 = working guess
 """
 
-		V = self.num_verts_per_mesh()[mesh_idx]
-		p = self.verts_padded()[mesh_idx]  # initial mesh
+		handle_verts_pos.to(self.device)
+		V = self.num_verts_per_mesh()[mesh_idx].to(self.device)
+		p = self.verts_padded()[mesh_idx].to(self.device)  # initial mesh
 
 		if "w_padded" not in self.precomputed_params:
 			self.precompute_laplacian()
 
-		L = self.precomputed_params["L_padded"][mesh_idx]
+		L = self.precomputed_params["L_padded"][mesh_idx].to(self.device)
 
 		known_handles = {i: pos for i, pos in zip(handle_verts, handle_verts_pos)}
 		known_static = {v: p[v] for v in static_verts}
@@ -226,7 +230,7 @@ class ARAPMeshes(Meshes):
 		## modify L, L_inv and b_fixed to incorporate boundary conditions
 		unknown_verts = [n for n in range(V) if n not in known]  # indices of all unknown verts
 
-		b_fixed = torch.zeros((V, 3))  # factor to be subtracted from b, due to constraints
+		b_fixed = torch.zeros((V, 3), device=self.device)  # factor to be subtracted from b, due to constraints
 		for k, pos in known.items():
 			b_fixed += torch.einsum("i,j->ij", L[:, k], pos)  # [unknown]
 
@@ -234,7 +238,7 @@ class ARAPMeshes(Meshes):
 		if "L_reduced_inv" not in self.precomputed_params:
 			self.precompute_reduced_laplacian(static_verts, handle_verts)
 
-		L_reduced_inv = self.precomputed_params["L_reduced_inv"]
+		L_reduced_inv = self.precomputed_params["L_reduced_inv"].to(self.device)
 
 		orn = self.one_ring_neighbours[mesh_idx]
 		max_neighbours = max(map(len, orn.values()))  # largest number of neighbours
@@ -418,7 +422,7 @@ def get_cot_weights_full(meshes, verts=None, device="cuda", sparse=False) -> tor
 		cota = (B2 + C2 - A2) / area
 		cotb = (A2 + C2 - B2) / area
 		cotc = (A2 + B2 - C2) / area
-		cot = torch.stack([cota, cotb, cotc], dim=1)
+		cot = torch.stack([cota, cotb, cotc], dim=1).to(device)
 		cot /= 4.0
 
 		if sparse:
