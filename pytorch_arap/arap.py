@@ -83,6 +83,11 @@ class ARAPMeshes(Meshes):
 		:param optimise: flag if mesh will be used for optimisation
 		"""
 
+		verts = torch.tensor(verts).to(device)
+		faces = torch.tensor(faces).to(device)
+		if textures is not None:
+			textures = textures.to(device)
+
 		super().__init__(verts, faces, textures)
 
 		self.one_ring_neighbours = self.get_one_ring_neighbours()
@@ -98,7 +103,6 @@ class ARAPMeshes(Meshes):
 		self.w_nfmts = w_nfmts
 
 		self.device = device
-		self.to(device)
 
 	def get_one_ring_neighbours(self):
 		"""Return a dict, where key i gives a list of all neighbouring vertices (connected by exactly one edge)"""
